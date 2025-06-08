@@ -1,12 +1,41 @@
 #!/bin/bash
 set -e
 
+# ====== 基础信息 ======
+VERSION="1.0.0"
+REPO="Alanniea/ce"
 CONFIG_FILE=/etc/limit_config.conf
 mkdir -p /etc
 
 DEFAULT_GB=20
 DEFAULT_RATE="512kbit"
 
+# ====== 自动更新函数 ======
+check_update() {
+  echo "📡 正在检查更新..."
+  LATEST=$(curl -s "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" | grep '^VERSION=' | head -n1 | cut -d'"' -f2)
+  if [[ "$LATEST" != "$VERSION" ]]; then
+    echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
+    read -p "是否立即更新 install_limit.sh？[Y/n] " choice
+    if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o /root/install_limit.sh
+      chmod +x /root/install_limit.sh
+      echo "✅ 更新完成，请执行 ./install_limit.sh 重新安装"
+    else
+      echo "🚫 已取消更新"
+    fi
+  else
+    echo "✅ 当前已经是最新版本（$VERSION）"
+  fi
+}
+
+# ====== 支持命令行参数 --update ======
+if [[ "$1" == "--update" ]]; then
+  check_update
+  exit 0
+fi
+
+# ====== 初始化配置文件 ======
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "LIMIT_GB=$DEFAULT_GB" > "$CONFIG_FILE"
   echo "LIMIT_RATE=$DEFAULT_RATE" >> "$CONFIG_FILE"
@@ -34,9 +63,9 @@ echo "检测到主用网卡：$IFACE"
 
 echo "🛠 [1/6] 安装依赖..."
 if command -v apt >/dev/null 2>&1; then
-  apt update -y && apt install -y vnstat iproute2
+  apt update -y && apt install -y vnstat iproute2 curl
 elif command -v yum >/dev/null 2>&1; then
-  yum install -y epel-release && yum install -y vnstat iproute
+  yum install -y epel-release && yum install -y vnstat iproute curl
 else
   echo "⚠️ 未知包管理器，请手动安装 vnstat 和 iproute2"
 fi
@@ -93,7 +122,6 @@ YELLOW='\033[1;33m'
 CYAN='\033[1;36m'
 RESET='\033[0m'
 
-VERSION="1.0.0"
 CONFIG_FILE=/etc/limit_config.conf
 source $CONFIG_FILE
 IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n 1)
@@ -105,41 +133,6 @@ get_usage_info() {
   echo "$USAGE" "$USAGE_PERCENT"
 }
 
-if [[ "$1" == "--help" ]]; then
-  echo "用法: ce [选项]"
-  echo ""
-  echo "无参数     进入交互式面板"
-  echo "--check     检查是否需要限速"
-  echo "--clear     手动解除限速"
-  echo "--status    查看限速状态"
-  echo "--set GB RATE  设置每日流量上限和限速值"
-  echo "--version   显示脚本版本"
-  exit 0
-elif [[ "$1" == "--version" ]]; then
-  echo "ce 限速控制台版本: $VERSION"
-  exit 0
-elif [[ "$1" == "--check" ]]; then
-  bash /root/limit_bandwidth.sh
-  exit $?
-elif [[ "$1" == "--clear" ]]; then
-  bash /root/clear_limit.sh
-  exit $?
-elif [[ "$1" == "--status" ]]; then
-  tc -s qdisc ls dev "$IFACE"
-  exit $?
-elif [[ "$1" == "--set" ]]; then
-  if [[ "$2" =~ ^[0-9]+$ ]] && [[ "$3" =~ ^[0-9]+(kbit|mbit)$ ]]; then
-    echo "LIMIT_GB=$2" > $CONFIG_FILE
-    echo "LIMIT_RATE=$3" >> $CONFIG_FILE
-    echo -e "${GREEN}✅ 配置已更新：每日${2}GiB，限速${3}${RESET}"
-    exit 0
-  else
-    echo -e "${RED}❌ 参数无效，请使用：ce --set 20 512kbit${RESET}"
-    exit 1
-  fi
-fi
-
-# 交互菜单
 while true; do
   clear
   read USAGE USAGE_PERCENT < <(get_usage_info)
@@ -157,8 +150,9 @@ while true; do
   echo -e "${GREEN}5.${RESET} 删除限速脚本"
   echo -e "${GREEN}6.${RESET} 修改限速配置"
   echo -e "${GREEN}7.${RESET} 退出"
+  echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
   echo ""
-  read -p "👉 请选择操作 [1-7]: " opt
+  read -p "👉 请选择操作 [1-8]: " opt
   case "$opt" in
     1) bash /root/limit_bandwidth.sh ;;
     2) bash /root/clear_limit.sh ;;
@@ -182,6 +176,7 @@ while true; do
         echo -e "${RED}❌ 输入无效${RESET}"
       fi ;;
     7) break ;;
+    8) bash /root/install_limit.sh --update ;;
     *) echo -e "${RED}❌ 无效选项${RESET}" ;;
   esac
   read -p "⏎ 按回车继续..." dummy
@@ -193,4 +188,5 @@ chmod +x /usr/local/bin/ce
 echo "🎯 使用命令 'ce' 进入交互式管理面板"
 echo "✅ 每小时检测是否超限，超出 $LIMIT_GB GiB 自动限速 $LIMIT_RATE"
 echo "⏰ 每天 0 点自动解除限速并刷新流量统计"
+echo "📡 你可以随时运行 'ce' -> [8] 或 './install_limit.sh --update' 来检查更新"
 echo "🎉 安装完成！"
