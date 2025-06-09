@@ -28,8 +28,7 @@ check_update() {
     echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
     read -p "是否立即更新？[Y/n] " choice
     if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" \
-           -o "$SCRIPT_PATH"
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
       chmod +x "$SCRIPT_PATH"
       echo "✅ 更新完成，请执行 $SCRIPT_PATH 重新安装"
     else
@@ -64,7 +63,10 @@ else
 fi
 echo "系统：$OS_NAME $OS_VER"
 
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show \
+        | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n1)
 if [ -z "$IFACE" ]; then
   echo "⚠️ 未检测到网卡，请手动设置 IFACE"
   exit 1
@@ -93,14 +95,15 @@ IFACE="$IFACE"
 CONFIG_FILE=/etc/limit_config.conf
 source "\$CONFIG_FILE"
 
-LINE=\$(vnstat -d -i "\$IFACE" | grep "\$(date '+%Y-%m-%d')")
-USAGE=\$(echo "\$LINE" | awk '{print \$3}')
-UNIT=\$(echo "\$LINE" | awk '{print \$4}')
+LINE=\$(vnstat -d -i "\$IFACE" | grep "\$(date '+%Y-%m-%d')" | tail -n1)
+RX=\$(echo "\$LINE" | awk '{print \$3}')
+RX_UNIT=\$(echo "\$LINE" | awk '{print \$4}')
 
-if [[ "\$UNIT" == "MiB" ]]; then
-  USAGE=\$(awk "BEGIN {printf \"%.2f\", \$USAGE / 1024}")
+if [[ "\$RX_UNIT" == "MiB" ]]; then
+  RX=\$(awk "BEGIN {printf \"%.2f\", \$RX/1024}")
 fi
-USAGE_INT=\$(printf "%.0f" "\$USAGE")
+
+USAGE_INT=\$(printf "%.0f" "\$RX")
 
 if (( USAGE_INT >= LIMIT_GB )); then
   PCT=\$(( USAGE_INT * 100 / LIMIT_GB ))
@@ -125,9 +128,12 @@ EOL
 chmod +x /root/clear_limit.sh
 
 echo "📅 [5/6] 写入 cron 任务..."
-crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
+crontab -l 2>/dev/null \
+  | grep -vE 'limit_bandwidth.sh|clear_limit.sh' \
+  > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" \
+     >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -137,10 +143,11 @@ cat > /usr/local/bin/ce <<'EOF'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[1;36m'; RESET='\033[0m'
 
-CONFIG_FILE=/etc/limit_config.conf
-source "$CONFIG_FILE"
+source /etc/limit_config.conf
 VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n1)
 
 while true; do
   DATE=$(date '+%Y-%m-%d')
@@ -148,15 +155,13 @@ while true; do
   IP4=$(curl -s ifconfig.me || echo "未知")
   LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A")
 
-  VN=$(vnstat -d -i "$IFACE")
-  LINE=$(echo "$VN" | grep "$(date '+%Y-%m-%d')")
-  TX=$(echo "$LINE" | awk '{print $6}')
+  LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')" | tail -n1)
   RX=$(echo "$LINE" | awk '{print $3}')
   UNIT=$(echo "$LINE" | awk '{print $4}')
   if [[ "$UNIT" == "MiB" ]]; then
     RX=$(awk "BEGIN{printf \"%.2f\", $RX/1024}")
   fi
-  UP_STR="上行: ${TX:-0} GiB"
+  UP_STR="上行: N/A"
   DOWN_STR="下行: ${RX:-0} GiB"
 
   TC_OUT=$(tc qdisc show dev "$IFACE")
