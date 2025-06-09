@@ -4,20 +4,11 @@ set -e
 # ====== 基础信息 ======
 VERSION="1.0.0"
 REPO="Alanniea/ce"
-SELF_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
 mkdir -p /etc
 
 DEFAULT_GB=20
 DEFAULT_RATE="512kbit"
-
-# ====== 自动保存脚本自身 ======
-if [[ "$0" != "$SELF_PATH" && ! -f "$SELF_PATH" ]]; then
-  echo "📦 正在保存 install_limit.sh 到 $SELF_PATH..."
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SELF_PATH"
-  chmod +x "$SELF_PATH"
-  echo "✅ install_limit.sh 已保存为本地文件"
-fi
 
 # ====== 自动更新函数 ======
 check_update() {
@@ -27,8 +18,8 @@ check_update() {
     echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
     read -p "是否立即更新 install_limit.sh？[Y/n] " choice
     if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SELF_PATH"
-      chmod +x "$SELF_PATH"
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o /root/install_limit.sh
+      chmod +x /root/install_limit.sh
       echo "✅ 更新完成，请执行 ./install_limit.sh 重新安装"
     else
       echo "🚫 已取消更新"
@@ -42,6 +33,14 @@ check_update() {
 if [[ "$1" == "--update" ]]; then
   check_update
   exit 0
+fi
+
+# ====== 自我保存 ======
+SCRIPT_PATH="/root/install_limit.sh"
+if [ ! -f "$SCRIPT_PATH" ]; then
+  echo "💾 正在保存 install_limit.sh 到本地..."
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
+  chmod +x "$SCRIPT_PATH"
 fi
 
 # ====== 初始化配置文件 ======
@@ -133,6 +132,7 @@ RESET='\033[0m'
 
 CONFIG_FILE=/etc/limit_config.conf
 source $CONFIG_FILE
+VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
 IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n 1)
 
 get_usage_info() {
@@ -149,6 +149,7 @@ while true; do
   echo -e "${CYAN}╔════════════════════════════════════════════════╗"
   echo -e "║        🚦 流量限速管理控制台（ce）              ║"
   echo -e "╚════════════════════════════════════════════════╝${RESET}"
+  echo -e "${YELLOW}当前版本：v${VERSION}${RESET}"
   echo -e "${YELLOW}当前网卡：${IFACE}${RESET}"
   echo -e "${GREEN}已用流量：${USAGE} GiB / ${LIMIT_GB} GiB（${USAGE_PERCENT}%）${RESET}"
   echo ""
