@@ -5,6 +5,7 @@ set -e
 VERSION="1.0.0"
 REPO="Alanniea/ce"
 CONFIG_FILE=/etc/limit_config.conf
+SCRIPT_PATH="/root/install_limit.sh"
 mkdir -p /etc
 
 DEFAULT_GB=20
@@ -18,9 +19,10 @@ check_update() {
     echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
     read -p "是否立即更新 install_limit.sh？[Y/n] " choice
     if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o /root/install_limit.sh
-      chmod +x /root/install_limit.sh
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
+      chmod +x "$SCRIPT_PATH"
       echo "✅ 更新完成，请执行 ./install_limit.sh 重新安装"
+      exit 0
     else
       echo "🚫 已取消更新"
     fi
@@ -29,14 +31,13 @@ check_update() {
   fi
 }
 
-# ====== 支持命令行参数 --update ======
+# ====== 支持 --update 参数 ======
 if [[ "$1" == "--update" ]]; then
   check_update
   exit 0
 fi
 
 # ====== 自我保存 ======
-SCRIPT_PATH="/root/install_limit.sh"
 if [ ! -f "$SCRIPT_PATH" ]; then
   echo "💾 正在保存 install_limit.sh 到本地..."
   curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
@@ -139,7 +140,7 @@ get_usage_info() {
   RAW=$(vnstat --oneline -i "$IFACE" 2>/dev/null | cut -d\; -f11 | sed 's/ GiB//')
   USAGE=$(printf "%.1f" "$RAW")
   USAGE_PERCENT=$(awk -v u="$RAW" -v l="$LIMIT_GB" 'BEGIN { printf "%.1f", (u / l) * 100 }')
-  echo "$USAGE" "$USAGE_PERCENT"
+  echo "$USAGE $USAGE_PERCENT"
 }
 
 while true; do
