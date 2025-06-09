@@ -6,7 +6,7 @@ VERSION="1.0.0"
 REPO="Alanniea/ce"
 CONFIG_FILE=/etc/limit_config.conf
 SCRIPT_PATH="/root/install_limit.sh"
-mkdir -p /etc
+CE_CMD="/usr/local/bin/ce"
 
 DEFAULT_GB=20
 DEFAULT_RATE="512kbit"
@@ -25,6 +25,7 @@ check_update() {
     else
       echo "🚫 已取消更新"
     fi
+    exit 0
   else
     echo "✅ 当前已经是最新版本（$VERSION）"
   fi
@@ -33,22 +34,18 @@ check_update() {
 # ====== 参数支持：--update ======
 if [[ "$1" == "--update" ]]; then
   check_update
-  exit 0
 fi
 
-# ====== 自我保存 ======
-if [ ! -f "$SCRIPT_PATH" ]; then
-  echo "💾 正在保存 install_limit.sh 到本地..."
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
-  chmod +x "$SCRIPT_PATH"
-fi
+# ====== 保存脚本自身 ======
+mkdir -p "$(dirname "$SCRIPT_PATH")"
+cp -f "$0" "$SCRIPT_PATH"
+chmod +x "$SCRIPT_PATH"
 
 # ====== 初始化配置文件 ======
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "LIMIT_GB=$DEFAULT_GB" > "$CONFIG_FILE"
   echo "LIMIT_RATE=$DEFAULT_RATE" >> "$CONFIG_FILE"
 fi
-
 source "$CONFIG_FILE"
 
 # ====== 自动识别系统和网卡 ======
@@ -63,7 +60,9 @@ else
 fi
 echo "检测到系统：$OS_NAME $OS_VER"
 
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n 1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n 1)
 if [ -z "$IFACE" ]; then
   echo "⚠️ 未检测到有效网卡，请手动设置 IFACE 变量"
   exit 1
@@ -77,7 +76,8 @@ if command -v apt >/dev/null 2>&1; then
 elif command -v yum >/dev/null 2>&1; then
   yum install -y epel-release && yum install -y vnstat iproute curl jq
 else
-  echo "⚠️ 未知包管理器，请手动安装 vnstat、iproute2 和 jq"
+  echo "⚠️ 未知包管理器，请手动安装 vnstat、iproute2、curl 和 jq"
+  exit 1
 fi
 
 # ====== 初始化 vnstat ======
@@ -88,30 +88,31 @@ systemctl enable vnstat
 systemctl restart vnstat
 
 # ====== 创建限速脚本 ======
-echo "📝 [3/6] 创建限速脚本..."
-cat > /root/limit_bandwidth.sh <<EOL
+echo "📝 [3/6] 创建限速脚本 (/root/limit_bandwidth.sh)..."
+cat > /root/limit_bandwidth.sh <<'EOL'
 #!/bin/bash
-IFACE="$IFACE"
+IFACE="__IFACE__"
 CONFIG_FILE=/etc/limit_config.conf
-source \$CONFIG_FILE
+source "$CONFIG_FILE"
 
-USAGE=\$(vnstat --oneline -i "\$IFACE" | cut -d\; -f11 | sed 's/ GiB//')
-USAGE_FLOAT=\$(printf "%.0f" "\$USAGE")
+USAGE=$(vnstat --oneline -i "$IFACE" | cut -d\; -f11 | sed 's/ GiB//')
+USAGE_INT=$(printf "%.0f" "$USAGE")
 
-if (( USAGE_FLOAT >= LIMIT_GB )); then
-  PERCENT=\$(( USAGE_FLOAT * 100 / LIMIT_GB ))
-  echo "[限速] 当前流量 \${USAGE_FLOAT}GiB（\${PERCENT}%），已超过限制，开始限速..."
-  tc qdisc del dev \$IFACE root 2>/dev/null || true
-  tc qdisc add dev \$IFACE root tbf rate \$LIMIT_RATE burst 32kbit latency 400ms
+if (( USAGE_INT >= LIMIT_GB )); then
+  PERCENT=$(( USAGE_INT * 100 / LIMIT_GB ))
+  echo "[限速] 当前流量 ${USAGE_INT}GiB (${PERCENT}%)，已超过限制，开始限速..."
+  tc qdisc del dev "$IFACE" root 2>/dev/null || true
+  tc qdisc add dev "$IFACE" root tbf rate "$LIMIT_RATE" burst 32kbit latency 400ms
 else
-  PERCENT=\$(( USAGE_FLOAT * 100 / LIMIT_GB ))
-  echo "[正常] 当前流量 \${USAGE_FLOAT}GiB（\${PERCENT}%），未超过限制"
+  PERCENT=$(( USAGE_INT * 100 / LIMIT_GB ))
+  echo "[正常] 当前流量 ${USAGE_INT}GiB (${PERCENT}%)，未超过限制"
 fi
 EOL
+sed -i "s#__IFACE__#$IFACE#g" /root/limit_bandwidth.sh
 chmod +x /root/limit_bandwidth.sh
 
 # ====== 创建解除限速脚本 ======
-echo "📝 [4/6] 创建解除限速脚本..."
+echo "📝 [4/6] 创建解除限速脚本 (/root/clear_limit.sh)..."
 cat > /root/clear_limit.sh <<EOL
 #!/bin/bash
 IFACE="$IFACE"
@@ -129,7 +130,7 @@ rm -f /tmp/crontab.bak
 
 # ====== 创建交互菜单命令 ce ======
 echo "🧩 [6/6] 创建交互菜单命令 ce..."
-cat > /usr/local/bin/ce <<'EOL'
+cat > "$CE_CMD" <<'EOL'
 #!/bin/bash
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -138,9 +139,11 @@ CYAN='\033[1;36m'
 RESET='\033[0m'
 
 CONFIG_FILE=/etc/limit_config.conf
-source $CONFIG_FILE
+source "$CONFIG_FILE"
 VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n 1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n 1)
 
 get_usage_info() {
   RAW=$(vnstat --oneline -i "$IFACE" 2>/dev/null | cut -d\; -f11 | sed 's/ GiB//')
@@ -150,4 +153,77 @@ get_usage_info() {
 }
 
 get_today_traffic() {
-  vnstat -i "$IFACE" --json | jq -r '.interfaces[0].traffic.day[-1] | "
+  # 输出当日接收(rx)和发送(tx)流量，单位 GiB
+  JSON=$(vnstat -i "$IFACE" --json)
+  RX=$(echo "$JSON" | jq '.interfaces[0].traffic.day[-1].rx/1024/1024' 2>/dev/null)
+  TX=$(echo "$JSON" | jq '.interfaces[0].traffic.day[-1].tx/1024/1024' 2>/dev/null)
+  printf "%.2f GiB (Rx) / %.2f GiB (Tx)\n" "$RX" "$TX"
+}
+
+is_limited() {
+  tc qdisc show dev "$IFACE" | grep -q "tbf" && echo "已限速" || echo "未限速"
+}
+
+while true; do
+  clear
+  read USAGE USAGE_PERCENT < <(get_usage_info)
+  TODAY_TRAFFIC=$(get_today_traffic)
+  LIMIT_STATE=$(is_limited)
+
+  echo -e "${CYAN}╔════════════════════════════════════════════════╗"
+  echo -e "║        🚦 流量限速管理控制台（ce）              ║"
+  echo -e "╚════════════════════════════════════════════════╝${RESET}"
+  echo -e "${YELLOW}当前版本：v${VERSION}${RESET}"
+  echo -e "${YELLOW}当前网卡：${IFACE}${RESET}"
+  echo -e "${GREEN}已用流量：${USAGE} GiB / ${LIMIT_GB} GiB（${USAGE_PERCENT}%）${RESET}"
+  echo -e "${GREEN}今日流量：${TODAY_TRAFFIC}${RESET}"
+  echo -e "${GREEN}限速状态：${LIMIT_STATE}${RESET}"
+  echo ""
+  echo -e "${GREEN}1.${RESET} 检查是否应限速"
+  echo -e "${GREEN}2.${RESET} 手动解除限速"
+  echo -e "${GREEN}3.${RESET} 查看限速规则"
+  echo -e "${GREEN}4.${RESET} 查看每日流量详情"
+  echo -e "${GREEN}5.${RESET} 删除限速脚本及命令"
+  echo -e "${GREEN}6.${RESET} 修改限速配置"
+  echo -e "${GREEN}7.${RESET} 退出"
+  echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
+  echo ""
+  read -p "👉 请选择操作 [1-8]: " opt
+  case "$opt" in
+    1) bash /root/limit_bandwidth.sh ;;
+    2) bash /root/clear_limit.sh ;;
+    3) tc -s qdisc ls dev "$IFACE" ;;
+    4) vnstat -d ;;
+    5)
+      rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh "$CE_CMD"
+      echo -e "${YELLOW}已删除所有限速相关脚本和命令${RESET}"
+      break
+      ;;
+    6)
+      echo -e "\n当前限制：${YELLOW}${LIMIT_GB} GiB${RESET}，限速：${YELLOW}${LIMIT_RATE}${RESET}"
+      read -p "🔧 新的每日流量限制（GiB）: " new_gb
+      read -p "🚀 新的限速值（如 512kbit、1mbit）: " new_rate
+      if [[ "$new_gb" =~ ^[0-9]+$ ]] && [[ "$new_rate" =~ ^[0-9]+(kbit|mbit)$ ]]; then
+        echo "LIMIT_GB=$new_gb" > $CONFIG_FILE
+        echo "LIMIT_RATE=$new_rate" >> $CONFIG_FILE
+        echo -e "${GREEN}✅ 配置已更新${RESET}"
+      else
+        echo -e "${RED}❌ 输入无效${RESET}"
+      fi
+      ;;
+    7) break ;;
+    8) bash /root/install_limit.sh --update ;;
+    *) echo -e "${RED}❌ 无效选项${RESET}" ;;
+  esac
+  read -p "⏎ 按回车继续..." dummy
+done
+EOL
+
+chmod +x "$CE_CMD"
+
+# ====== 安装完成提示 ======
+echo "🎯 使用命令 'ce' 进入交互式管理面板"
+echo "✅ 每小时检测是否超限，超出 ${LIMIT_GB} GiB 自动限速 ${LIMIT_RATE}"
+echo "⏰ 每天 0 点自动解除限速并刷新流量统计"
+echo "📡 可随时运行 'ce' -> [8] 或 './install_limit.sh --update' 来检查更新"
+echo "🎉 安装完成！"
