@@ -195,9 +195,8 @@ while true; do
   echo -e "${GREEN}6.${RESET} 修改限速配置"
   echo -e "${GREEN}7.${RESET} 退出"
   echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
-  echo -e "${GREEN}9.${RESET} 运行 Speedtest 测速"
   echo
-  read -p "👉 请选择操作 [1-9]: " opt
+  read -p "👉 请选择操作 [1-8]: " opt
   case "$opt" in
     1) /root/limit_bandwidth.sh ;;
     2) /root/clear_limit.sh ;;
@@ -222,24 +221,6 @@ while true; do
       ;;
     7) break ;;
     8) /root/install_limit.sh --update ;;
-    9)
-      if ! command -v speedtest &>/dev/null; then
-        echo -e "${YELLOW}正在安装 speedtest-cli...${RESET}"
-        if command -v apt &>/dev/null; then
-          apt update && apt install -y curl
-          curl -s https://install.speedtest.net/app/cli/install.deb -o /tmp/speedtest.deb
-          dpkg -i /tmp/speedtest.deb
-        elif command -v yum &>/dev/null; then
-          curl -s https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.rpm -o /tmp/speedtest.rpm
-          yum localinstall -y /tmp/speedtest.rpm
-        else
-          echo -e "${RED}❌ 不支持的系统，无法自动安装 speedtest${RESET}"
-          continue
-        fi
-      fi
-      echo -e "${CYAN}开始运行 Speedtest...${RESET}"
-      speedtest
-      ;;
     *) echo -e "${RED}无效${RESET}" ;;
   esac
   read -p "⏎ 回车继续..." dummy
