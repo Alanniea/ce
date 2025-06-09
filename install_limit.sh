@@ -28,8 +28,7 @@ check_update() {
     echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
     read -p "是否立即更新？[Y/n] " choice
     if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" \
-           -o "$SCRIPT_PATH"
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
       chmod +x "$SCRIPT_PATH"
       echo "✅ 更新完成，请执行 $SCRIPT_PATH 重新安装"
     else
@@ -64,7 +63,10 @@ else
 fi
 echo "系统：$OS_NAME $OS_VER"
 
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show \
+        | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n1)
 if [ -z "$IFACE" ]; then
   echo "⚠️ 未检测到网卡，请手动设置 IFACE"
   exit 1
@@ -125,9 +127,12 @@ EOL
 chmod +x /root/clear_limit.sh
 
 echo "📅 [5/6] 写入 cron 任务..."
-crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
+crontab -l 2>/dev/null \
+  | grep -vE 'limit_bandwidth.sh|clear_limit.sh' \
+  > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" \
+     >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -140,7 +145,9 @@ CYAN='\033[1;36m'; RESET='\033[0m'
 CONFIG_FILE=/etc/limit_config.conf
 source "$CONFIG_FILE"
 VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
+        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
+        | head -n1)
 
 while true; do
   DATE=$(date '+%Y-%m-%d')
@@ -230,7 +237,8 @@ while true; do
           curl -s https://install.speedtest.net/app/cli/install.deb -o /tmp/speedtest.deb
           dpkg -i /tmp/speedtest.deb
         elif command -v yum &>/dev/null; then
-          curl -s https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.rpm -o /tmp/speedtest.rpm
+          curl -s https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.rpm \
+            -o /tmp/speedtest.rpm
           yum localinstall -y /tmp/speedtest.rpm
         else
           echo -e "${RED}❌ 不支持的系统，无法自动安装 speedtest${RESET}"
