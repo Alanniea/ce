@@ -85,8 +85,15 @@ fi
 echo "✅ [2/6] 初始化 vnStat..."
 vnstat -u -i "$IFACE" || true # 初始化数据库，如果已存在则忽略
 sleep 2 # 给予vnstat一些时间来创建数据库文件
-systemctl enable vnstat
-systemctl restart vnstat
+
+# 启用并启动 vnstat 服务
+if command -v systemctl >/dev/null; then
+  systemctl enable vnstat
+  systemctl restart vnstat
+else
+  /usr/lib/systemd/systemd-sysv-install enable vnstat
+  /usr/lib/systemd/systemd-sysv-install restart vnstat
+fi
 
 echo "📝 [3/6] 生成限速脚本..."
 cat > /root/limit_bandwidth.sh <<EOL
