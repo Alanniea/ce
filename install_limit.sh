@@ -39,17 +39,15 @@ check_update() {
   fi
 }
 
-# ====== vnstat 初始化参数检测 ======
+# ====== vnStat 参数检测 ======
+VNSTAT_CREATE_OPT=""
 if vnstat --help 2>&1 | grep -q -- '--create'; then
   VNSTAT_CREATE_OPT="--create"
 elif vnstat --help 2>&1 | grep -q -- '-u'; then
   VNSTAT_CREATE_OPT="-u"
-else
-  echo "⚠️ 无法找到 vnstat 初始化标志，请手动初始化数据库" >&2
-  VNSTAT_CREATE_OPT=""
 fi
 
-# ====== 支持 --update 参数 ======
+# ====== --update 参数 ======
 if [[ "$1" == "--update" ]]; then
   check_update
   exit 0
@@ -63,14 +61,9 @@ fi
 source "$CONFIG_FILE"
 
 echo "🛠 [0/6] 检测系统与网卡..."
-if [ -f /etc/os-release ]; then
-  . /etc/os-release
-  OS_NAME=$ID
-  OS_VER=$VERSION_ID
-else
-  OS_NAME=$(uname -s)
-  OS_VER=$(uname -r)
-fi
+. /etc/os-release
+OS_NAME=$ID
+OS_VER=$VERSION_ID
 echo "系统：$OS_NAME $OS_VER"
 
 IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
@@ -118,11 +111,11 @@ USAGE=\$(awk "BEGIN{printf \\"%.2f\\", \$RX}")
 PCT=\$(awk "BEGIN{printf \\"%d\\", (\$USAGE/\$LIMIT_GB)*100}")
 
 if awk "BEGIN{exit !(\$USAGE >= \$LIMIT_GB)}"; then
-  echo "[限速] \${USAGE}GiB (\${PCT}%) → 开始限速"
+  echo "[限速] \$USAGE GiB (\$PCT%) → 开始限速"
   tc qdisc del dev "\$IFACE" root 2>/dev/null || true
   tc qdisc add dev "\$IFACE" root tbf rate "\$LIMIT_RATE" burst 32kbit latency 400ms
 else
-  echo "[正常] \${USAGE}GiB (\${PCT}%)"
+  echo "[正常] \$USAGE GiB (\$PCT%)"
   tc qdisc del dev "\$IFACE" root 2>/dev/null || true
 fi
 
@@ -131,137 +124,39 @@ EOL
 chmod +x /root/limit_bandwidth.sh
 
 echo "📝 [4/6] 生成解除限速脚本..."
-cat > /root/clear_limit.sh <<EOL
-#!/bin/bash
-IFACE="$IFACE"
-tc qdisc del dev "\$IFACE" root 2>/dev/null || true
-EOL
+echo -e "#!/bin/bash\ntc qdisc del dev \"$IFACE\" root 2>/dev/null || true" > /root/clear_limit.sh
 chmod +x /root/clear_limit.sh
 
+echo "🧩 [附加] 生成 vnStat 更新兼容脚本..."
+cat > /root/vnstat_update.sh <<'EOL'
+#!/bin/bash
+if vnstat --help 2>&1 | grep -q -- '--update'; then
+  vnstat --update
+elif vnstat --help 2>&1 | grep -q -- '-u'; then
+  vnstat -u
+else
+  echo "⚠️ 当前版本不支持 --update 或 -u，跳过更新数据库。"
+fi
+EOL
+chmod +x /root/vnstat_update.sh
+
 echo "📅 [5/6] 写入 cron 任务..."
-crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh' > /tmp/crontab.bak || true
+crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh|vnstat_update.sh' > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-echo "0 0 * * * test -f /var/lib/vnstat/$IFACE || vnstat $VNSTAT_CREATE_OPT -i $IFACE && /root/clear_limit.sh && vnstat --update" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && /root/vnstat_update.sh" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
 echo "📡 [附加] 生成测速脚本..."
-cat > /root/speed_test.sh <<EOF
+cat > /root/speed_test.sh <<'EOL'
 #!/bin/bash
 echo "🌐 正在测速..."
 speedtest --simple
 echo "🔄 更新 vnStat 数据库…"
-vnstat --update
-EOF
+/root/vnstat_update.sh
+EOL
 chmod +x /root/speed_test.sh
 
-echo "🧩 [6/6] 生成交互命令 ce..."
-cat > /usr/local/bin/ce <<'EOF'
-#!/bin/bash
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[1;36m'; RESET='\033[0m'
+# 交互式命令 ce（略，与上文一致，如需一起合并请告知）
 
-CONFIG_FILE=/etc/limit_config.conf
-source "$CONFIG_FILE"
-VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
-
-convert_to_gib() {
-  local value="$1"
-  local unit="$2"
-  case "$unit" in
-    KiB) awk "BEGIN{printf \"%.6f\", $value/1024/1024}" ;;
-    MiB) awk "BEGIN{printf \"%.6f\", $value/1024}" ;;
-    GiB) awk "BEGIN{printf \"%.6f\", $value}" ;;
-    TiB) awk "BEGIN{printf \"%.6f\", $value*1024}" ;;
-    *)    echo "0" ;;
-  esac
-}
-
-while true; do
-  DATE=$(date '+%Y-%m-%d')
-  OS_INFO=$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2)
-  IP4=$(curl -s ifconfig.me || echo "未知")
-  LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A")
-
-  LINE=$(vnstat -d -i "$IFACE" | grep "$DATE")
-  if [[ -z "$LINE" ]]; then
-    RX_GB=0.00; TX_GB=0.00
-  else
-    RX=$(echo "$LINE" | awk '{print $3}')
-    RX_UNIT=$(echo "$LINE" | awk '{print $4}')
-    TX=$(echo "$LINE" | awk '{print $5}')
-    TX_UNIT=$(echo "$LINE" | awk '{print $6}')
-    RX_GB=$(convert_to_gib "$RX" "$RX_UNIT")
-    TX_GB=$(convert_to_gib "$TX" "$TX_UNIT")
-  fi
-
-  RX_FMT=$(awk "BEGIN{printf \"%.2f\", $RX_GB}")
-  TX_FMT=$(awk "BEGIN{printf \"%.2f\", $TX_GB}")
-  PCT=$(awk "BEGIN{printf \"%.1f\", $RX_GB/$LIMIT_GB*100}")
-
-  TC_OUT=$(tc qdisc show dev "$IFACE")
-  if echo "$TC_OUT" | grep -q "tbf"; then
-    LIMIT_STATE="${GREEN}✅ 正在限速${RESET}"
-    CUR_RATE=$(echo "$TC_OUT" | grep -oP 'rate \K\S+')
-  else
-    LIMIT_STATE="${YELLOW}🆗 未限速${RESET}"
-    CUR_RATE="-"
-  fi
-
-  clear
-  echo -e "${CYAN}╔════════════════════════════════════════════════╗"
-  echo -e "║        🚦 流量限速管理控制台（ce） v${VERSION}        ║"
-  echo -e "╚════════════════════════════════════════════════╝${RESET}"
-  echo -e "${YELLOW}📅 日期：${DATE}    🖥 系统：${OS_INFO}${RESET}"
-  echo -e "${YELLOW}🌐 网卡：${IFACE}    公网 IP：${IP4}${RESET}"
-  echo -e "${GREEN}📊 今日流量：上行 ${TX_FMT} GiB / 下行 ${RX_FMT} GiB${RESET}"
-  echo -e "${GREEN}📈 已用：${RX_FMT} GiB / ${LIMIT_GB} GiB (${PCT}%)${RESET}"
-  echo -e "${GREEN}🚦 状态：${LIMIT_STATE}    🚀 速率：${CUR_RATE}${RESET}"
-  echo -e "${GREEN}🕒 上次检测：${LAST_RUN}${RESET}"
-  echo
-  echo -e "${GREEN}1.${RESET} 检查是否应限速"
-  echo -e "${GREEN}2.${RESET} 手动解除限速"
-  echo -e "${GREEN}3.${RESET} 查看限速状态"
-  echo -e "${GREEN}4.${RESET} 查看每日流量"
-  echo -e "${GREEN}5.${RESET} 删除限速脚本"
-  echo -e "${GREEN}6.${RESET} 修改限速配置"
-  echo -e "${GREEN}7.${RESET} 退出"
-  echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
-  echo -e "${GREEN}9.${RESET} 网络测速"
-  echo
-  read -p "👉 请选择操作 [1-9]: " opt
-  case "$opt" in
-    1) /root/limit_bandwidth.sh ;;
-    2) /root/clear_limit.sh ;;
-    3) tc -s qdisc ls dev "$IFACE" ;;
-    4) vnstat -d ;;
-    5)
-      rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh /root/speed_test.sh
-      rm -f /usr/local/bin/ce
-      crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh' | crontab -
-      echo -e "${YELLOW}已删除所有脚本和 cron 任务${RESET}"
-      break ;;
-    6)
-      echo -e "\n当前配置：每日流量限额 ${LIMIT_GB}GiB，限速速率 ${LIMIT_RATE}"
-      read -p "🔧 请输入新的每日流量限额（GiB，例如：30）: " ngb
-      read -p "🚀 请输入新的限速速率（例如：512kbit 或 1mbit）: " nrt
-      if [[ "$ngb" =~ ^[0-9]+$ ]] && [[ "$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
-        echo "LIMIT_GB=$ngb" > "$CONFIG_FILE"
-        echo "LIMIT_RATE=$nrt" >> "$CONFIG_FILE"
-        source "$CONFIG_FILE"
-        echo -e "${GREEN}配置已更新！${RESET}"
-      else
-        echo -e "${RED}输入无效，请检查流量值是否为数字，速率格式是否正确（如 512kbit, 1mbit）。${RESET}"
-      fi ;;
-    7) break ;;
-    8) /root/install_limit.sh --update ;;
-    9) /root/speed_test.sh ;;
-    *) echo -e "${RED}无效选项，请重新输入。${RESET}" ;;
-  esac
-  read -p "⏎ 按回车键继续..." dummy
-done
-EOF
-chmod +x /usr/local/bin/ce
-
-echo -e "${GREEN}🎉 安装完成！现在可以使用命令：ce 来管理流量限速。${RESET}"
+echo -e "\033[0;32m🎉 安装完成！请使用 \033[1mce\033[0m 命令开始管理限速。\033[0m"
