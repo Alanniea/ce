@@ -309,3 +309,6 @@ read -p "⏎ 回车继续..." dummy
 done
 EOF
 
+chmod +x /usr/local/bin/ce
+
+echo "🎉 安装完成！现在可以使用命令： ${GREEN}ce${RESET} 来管理你的流量。"
