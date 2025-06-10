@@ -5,6 +5,9 @@ set -e
 #               基础信息 (Basic Info)
 # ==================================================
 # Changelog:
+# v1.1.3:
+# - Fixed vnstat update command in speed_test.sh and cron job to use -u instead of --update,
+#   resolving "update parameter not supported" error on modern vnStat versions (e.g., v2.12).
 # v1.1.2:
 # - Implemented a more robust vnstat command detection by checking the version number.
 #   This provides a more reliable way to choose between `--add` (v2.7+) and `--create` (older versions).
@@ -12,7 +15,7 @@ set -e
 # - Standardized the vnstat update command in the helper script.
 # v1.1.1:
 # - Fixed vnstat initialization for modern versions, improved service detection.
-VERSION="1.1.2"
+VERSION="1.1.3" # Updated version
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE="/etc/limit_config.conf"
@@ -218,7 +221,8 @@ chmod +x /root/clear_limit.sh
 echo "📅 [5/6] 设置 cron 定时任务..."
 (crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh') > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh >> /var/log/limit.log 2>&1" >> /tmp/crontab.bak
-echo "0 0 * * * /root/clear_limit.sh && vnstat --update -i $IFACE" >> /tmp/crontab.bak
+# Changed vnstat --update to vnstat -u -i $IFACE
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -232,7 +236,8 @@ echo "🌐 正在使用 speedtest-cli 进行测速..."
 speedtest --simple
 echo "🔄 测速完成，更新 vnStat 数据库..."
 # 为确保数据被采集，明确更新指定网卡
-vnstat --update -i "$IFACE"
+# Changed vnstat --update to vnstat -u
+vnstat -u -i "$IFACE"
 EOF
 chmod +x /root/speed_test.sh
 
