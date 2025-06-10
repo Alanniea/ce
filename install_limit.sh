@@ -1,296 +1,312 @@
 #!/bin/bash
+# A script to limit bandwidth after exceeding a daily traffic quota.
 set -e
 
-# ====== 基础信息 ======
-
-VERSION="1.0.5"
+# ====================
+# Basic Information
+# ====================
+VERSION="1.0.6" # Updated version with fixes
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
-CONFIG_FILE=/etc/limit_config.conf
+CONFIG_FILE="/etc/limit_config.conf"
+LOG_FILE="/var/log/limit.log"
 mkdir -p /etc
 
+# Default values if config file doesn't exist
 DEFAULT_GB=20
 DEFAULT_RATE="512kbit"
 
-# ====== 自动保存自身 ======
-
+# ====================
+# Auto-save Self
+# ====================
+# Ensures the script is saved to a permanent location for future use.
 if [[ "$0" != "$SCRIPT_PATH" && ! -f "$SCRIPT_PATH" ]]; then
-echo "💾 正在保存 install_limit.sh 到 $SCRIPT_PATH..."
-curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
-chmod +x "$SCRIPT_PATH"
-echo "✅ 已保存"
+    echo "💾 Saving install_limit.sh to $SCRIPT_PATH..."
+    # Using curl to fetch the latest version from the repository.
+    curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
+    chmod +x "$SCRIPT_PATH"
+    echo "✅ Saved successfully."
 fi
 
-# ====== 自动更新函数 ======
-
+# ====================
+# Auto-update Function
+# ====================
 check_update() {
-echo "📡 正在检查更新..."
-LATEST=$(curl -s "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" \
-| grep '^VERSION=' | head -n1 | cut -d'"' -f2)
-if [[ "$LATEST" != "$VERSION" ]]; then
-echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
-read -p "是否立即更新？[Y/n] " choice
-if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
-chmod +x "$SCRIPT_PATH"
-echo "✅ 更新完成，请执行 $SCRIPT_PATH 重新安装"
-exit 0 # Exit after update to ensure user reruns the script
-else
-echo "🚫 已取消"
-fi
-else
-echo "✅ 已是最新（$VERSION）"
-fi
+    echo "📡 Checking for updates..."
+    # Fetch the version from the remote script.
+    LATEST=$(curl -s "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" | grep '^VERSION=' | head -n1 | cut -d'"' -f2)
+    if [[ "$LATEST" != "$VERSION" ]]; then
+        echo "🆕 New version found: $LATEST (current: $VERSION)"
+        read -p "Do you want to update now? [Y/n] " choice
+        if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
+            curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
+            echo "✅ Update complete. Please run '$SCRIPT_PATH' again to reinstall."
+        else
+            echo "🚫 Update cancelled."
+        fi
+    else
+        echo "✅ You are running the latest version ($VERSION)."
+    fi
 }
 
-# ====== 确认 vnstat 初始化参数 ======
-
-# Check for --create first (newer versions)
-if vnstat --help 2>&1 | grep -q -- '--create'; then
-VNSTAT_CREATE_OPT="--create"
-# If not, check for -u (older versions, also acts as update)
-elif vnstat --help 2>&1 | grep -q -- '-u'; then
-VNSTAT_CREATE_OPT="-u"
-else
-echo "⚠️ 无法找到 vnstat 初始化标志 (--create 或 -u)，请确认 vnstat 已正确安装且版本兼容。" >&2
-echo "请手动初始化数据库或更新 vnstat 到兼容版本。终止安装。"
-exit 1 # Exit if vnstat cannot be initialized
-fi
-
-# ====== 支持 --update 参数 ======
-
+# ====================
+# Support --update Parameter
+# ====================
 if [[ "$1" == "--update" ]]; then
-check_update
-exit 0
+    check_update
+    exit 0
 fi
 
-# ====== 初始化配置 ======
-
+# ====================
+# Initialize Configuration
+# ====================
 if [ ! -f "$CONFIG_FILE" ]; then
-echo "LIMIT_GB=$DEFAULT_GB" > "$CONFIG_FILE"
-echo "LIMIT_RATE=$DEFAULT_RATE" >> "$CONFIG_FILE"
+    echo "LIMIT_GB=$DEFAULT_GB" > "$CONFIG_FILE"
+    echo "LIMIT_RATE=$DEFAULT_RATE" >> "$CONFIG_FILE"
 fi
 source "$CONFIG_FILE"
 
-echo "🛠 [0/6] 检测系统与网卡..."
+# ====================
+# Main Installation
+# ====================
+echo "🛠️ [0/6] Detecting system and network interface..."
 if [ -f /etc/os-release ]; then
-. /etc/os-release
-OS_NAME=$ID
-OS_VER=$VERSION_ID
+    . /etc/os-release
+    OS_NAME=$ID
+    OS_VER=$VERSION_ID
 else
-OS_NAME=$(uname -s)
-OS_VER=$(uname -r)
+    OS_NAME=$(uname -s)
+    OS_VER=$(uname -r)
 fi
-echo "系统：$OS_NAME $OS_VER"
+echo "System: $OS_NAME $OS_VER"
 
+# Auto-detect the primary network interface.
 IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 if [ -z "$IFACE" ]; then
-echo "⚠️ 未检测到网卡，请手动设置 IFACE"
-exit 1
+    echo "⚠️ Could not detect a network interface. Please set IFACE manually." >&2
+    exit 1
 fi
-echo "主用网卡：$IFACE"
+echo "Primary Interface: $IFACE"
 
-echo "🛠 [1/6] 安装依赖..."
+echo "🛠️ [1/6] Installing dependencies..."
 if command -v apt >/dev/null; then
-apt update -y && apt install -y vnstat iproute2 curl speedtest-cli
+    apt update -y && apt install -y vnstat iproute2 curl speedtest-cli
 elif command -v yum >/dev/null; then
-yum install -y epel-release && yum install -y vnstat iproute curl speedtest-cli
+    yum install -y epel-release && yum install -y vnstat iproute curl speedtest-cli
 else
-echo "⚠️ 未知包管理器，请手动安装 vnstat、iproute2、speedtest-cli"
-# Do not exit here, allow script to continue and potentially fail later if tools are missing
+    echo "⚠️ Unknown package manager. Please manually install: vnstat, iproute2, curl, speedtest-cli" >&2
 fi
 
-echo "✅ [2/6] 初始化 vnStat..."
-# Removed || true to ensure initialization is successful
-vnstat $VNSTAT_CREATE_OPT -i "$IFACE"
+echo "✅ [2/6] Initializing vnStat..."
+# The -u flag is versatile; it creates the database if it doesn't exist or updates it.
+# This simplifies compatibility across different vnstat versions.
+vnstat -u -i "$IFACE" || true
 sleep 2
-systemctl enable vnstat
-systemctl restart vnstat
+# Enable and start the vnstat service, with fallbacks for non-systemd systems.
+systemctl enable vnstat --now 2>/dev/null || service vnstat restart 2>/dev/null || true
 
-echo "📝 [3/6] 生成限速脚本..."
+echo "📝 [3/6] Generating limiting script..."
 cat > /root/limit_bandwidth.sh <<EOL
 #!/bin/bash
 IFACE="$IFACE"
 CONFIG_FILE=/etc/limit_config.conf
-source "$CONFIG_FILE"
+source "\$CONFIG_FILE"
 
-LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')")
-RX=$(echo "$LINE" | awk '{print $3}')
-UNIT=$(echo "$LINE" | awk '{print $4}')
+# Get traffic for the current day
+LINE=\$(vnstat -d -i "\$IFACE" | grep "\$(date '+%Y-%m-%d')")
+RX=\$(echo "\$LINE" | awk '{print \$3}')
+UNIT=\$(echo "\$LINE" | awk '{print \$4}')
 
-case "$UNIT" in
-KiB) RX=$(awk "BEGIN{printf \"%.6f\", \$RX/1024/1024}") ;;
-MiB) RX=$(awk "BEGIN{printf \"%.6f\", \$RX/1024}") ;;
-GiB) RX=$(awk "BEGIN{printf \"%.6f\", \$RX}") ;;
-TiB) RX=$(awk "BEGIN{printf \"%.6f\", \$RX*1024}") ;;
-*) RX=0 ;;
+# Convert all units to GiB for comparison
+case "\$UNIT" in
+    KiB) RX=\$(awk "BEGIN{printf \"%.6f\", \$RX/1024/1024}") ;;
+    MiB) RX=\$(awk "BEGIN{printf \"%.6f\", \$RX/1024}") ;;
+    GiB) RX=\$(awk "BEGIN{printf \"%.6f\", \$RX}") ;;
+    TiB) RX=\$(awk "BEGIN{printf \"%.6f\", \$RX*1024}") ;;
+    *)   RX=0 ;;
 esac
 
-USAGE=$(awk "BEGIN{printf \"%.2f\", \$RX}")
-PCT=$(awk "BEGIN{printf \"%d\", (\$USAGE/\$LIMIT_GB)*100}")
+USAGE=\$(awk "BEGIN{printf \"%.2f\", \$RX}")
+PCT=\$(awk "BEGIN{printf \"%d\", (\$USAGE/\$LIMIT_GB)*100}")
 
+# Check if usage exceeds the limit
 if awk "BEGIN{exit !(\$USAGE >= \$LIMIT_GB)}"; then
-echo "[限速] ${USAGE}GiB (${PCT}%) → 开始限速"
-tc qdisc del dev "$IFACE" root 2>/dev/null || true
-tc qdisc add dev "$IFACE" root tbf rate "$LIMIT_RATE" burst 32kbit latency 400ms
+    echo "[\$(date)] Limit reached: \${USAGE}GiB (\${PCT}%) -> Throttling enabled."
+    tc qdisc del dev "\$IFACE" root 2>/dev/null || true
+    tc qdisc add dev "\$IFACE" root tbf rate "\$LIMIT_RATE" burst 32kbit latency 400ms
 else
-echo "[正常] ${USAGE}GiB (${PCT}%)"
-tc qdisc del dev "$IFACE" root 2>/dev/null || true
+    echo "[\$(date)] Status OK: \${USAGE}GiB (\${PCT}%)"
+    # Ensure no limit is active if usage is below the threshold
+    tc qdisc del dev "\$IFACE" root 2>/dev/null || true
 fi
 
+# Log the last run time
 date '+%Y-%m-%d %H:%M:%S' > /var/log/limit_last_run
 EOL
 chmod +x /root/limit_bandwidth.sh
 
-echo "📝 [4/6] 生成解除限速脚本..."
+echo "📝 [4/6] Generating unlimiting script..."
 cat > /root/clear_limit.sh <<EOL
 #!/bin/bash
 IFACE="$IFACE"
-tc qdisc del dev "$IFACE" root 2>/dev/null || true
+echo "Clearing any existing traffic limits..."
+tc qdisc del dev "\$IFACE" root 2>/dev/null || true
+echo "Limits cleared."
 EOL
 chmod +x /root/clear_limit.sh
 
-echo "📅 [5/6] 写入 cron 任务..."
-crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh' > /tmp/crontab.bak || true
-echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-# Changed vnstat --update to vnstat -u
-echo "0 0 * * * /root/clear_limit.sh && vnstat $VNSTAT_CREATE_OPT -i $IFACE && vnstat -u" >> /tmp/crontab.bak
+echo "📅 [5/6] Setting up cron jobs..."
+# Safely create or replace the crontab, adding logging for easier debugging.
+(crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh') > /tmp/crontab.bak
+echo "0 * * * * /root/limit_bandwidth.sh >> $LOG_FILE 2>&1" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
-echo "📡 [附加] 生成测速脚本..."
-cat > /root/speed_test.sh <<'EOF'
+echo "📡 [Bonus] Generating speed test script..."
+cat > /root/speed_test.sh <<EOL
 #!/bin/bash
-echo "🌐 正在测速..."
+echo "🌐 Running speed test..."
 speedtest --simple
-echo "🔄 更新 vnStat 数据库…"
-# Changed vnstat --update to vnstat -u
-vnstat -u
-EOF
+echo "🔄 Updating vnStat database..."
+# Force an update for the specific interface to reflect speed test traffic
+vnstat -u -i "$IFACE"
+EOL
 chmod +x /root/speed_test.sh
 
-echo "🧩 [6/6] 生成交互命令 ce..."
+echo "🧩 [6/6] Generating interactive command 'ce'..."
+# This heredoc creates the main control script.
 cat > /usr/local/bin/ce <<EOF
 #!/bin/bash
-if [[ "$1" == "--update" ]]; then
-exec /root/install_limit.sh --update
+if [[ "\$1" == "--update" ]]; then
+    exec "$SCRIPT_PATH" --update
 fi
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[1;36m'; RESET='\033[0m'
+# Color definitions
+RED='\\033[0;31m'; GREEN='\\033[0;32m'; YELLOW='\\033[1;33m'
+CYAN='\\033[1;36m'; RESET='\\033[0m'
 
-CONFIG_FILE=/etc/limit_config.conf
-source "$CONFIG_FILE"
-VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+CONFIG_FILE="$CONFIG_FILE"
+source "\$CONFIG_FILE"
+VERSION=\$(grep '^VERSION=' "$SCRIPT_PATH" | cut -d'"' -f2)
+IFACE=\$(ip -o link show | awk -F': ' '{print \$2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 
+# Function to convert different units to GiB
 convert_to_gib() {
-local value="$1"
-local unit="$2"
-case "$unit" in
-KiB) awk "BEGIN{printf \"%.6f\", \$value/1024/1024}" ;;
-MiB) awk "BEGIN{printf \"%.6f\", \$value/1024}" ;;
-GiB) awk "BEGIN{printf \"%.6f\", \$value}" ;;
-TiB) awk "BEGIN{printf \"%.6f\", \$value*1024}" ;;
-*) echo "0" ;;
-esac
+    local value="\$1"
+    local unit="\$2"
+    case "\$unit" in
+        KiB) awk "BEGIN{printf \\"%.6f\\", \$value/1024/1024}" ;;
+        MiB) awk "BEGIN{printf \\"%.6f\\", \$value/1024}" ;;
+        GiB) awk "BEGIN{printf \\"%.6f\\", \$value}" ;;
+        TiB) awk "BEGIN{printf \\"%.6f\\", \$value*1024}" ;;
+        *)   echo "0" ;;
+    esac
 }
 
+# Main loop for the interactive menu
 while true; do
-DATE=$(date '+%Y-%m-%d')
-OS_INFO=$(grep '^PRETTY_NAME=' /etc/os-release 2>/dev/null | cut -d'"' -f2 || echo "未知操作系统")
-IP4=$(curl -s ifconfig.me || echo "未知")
-LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A")
+    # Fetch current data for display
+    DATE=\$(date '+%Y-%m-%d')
+    OS_INFO=\$(grep '^PRETTY_NAME=' /etc/os-release | cut -d'"' -f2)
+    IP4=\$(curl -s4 ifconfig.me || echo "Unknown")
+    LAST_RUN=\$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A")
 
-LINE=$(vnstat -d -i "$IFACE" 2>/dev/null | grep "$DATE")
-if [[ -z "$LINE" ]]; then
-RX_GB=0.00; TX_GB=0.00
-else
-RX=$(echo "$LINE" | awk '{print $3}')
-RX_UNIT=$(echo "$LINE" | awk '{print $4}')
-TX=$(echo "$LINE" | awk '{print $5}')
-TX_UNIT=$(echo "$LINE" | awk '{print $6}')
-RX_GB=$(convert_to_gib "$RX" "$RX_UNIT")
-TX_GB=$(convert_to_gib "$TX" "$TX_UNIT")
-fi
+    LINE=\$(vnstat -d -i "\$IFACE" | grep "\$DATE")
+    if [[ -z "\$LINE" ]]; then
+        RX_GB=0.00; TX_GB=0.00
+    else
+        RX=\$(echo "\$LINE" | awk '{print \$3}'); RX_UNIT=\$(echo "\$LINE" | awk '{print \$4}')
+        TX=\$(echo "\$LINE" | awk '{print \$5}'); TX_UNIT=\$(echo "\$LINE" | awk '{print \$6}')
+        RX_GB=\$(convert_to_gib "\$RX" "\$RX_UNIT")
+        TX_GB=\$(convert_to_gib "\$TX" "\$TX_UNIT")
+    fi
 
-RX_FMT=$(awk "BEGIN{printf \"%.2f\", \$RX_GB}")
-TX_FMT=$(awk "BEGIN{printf \"%.2f\", \$TX_GB}")
-PCT=$(awk "BEGIN{printf \"%.1f\", (\$RX_GB/\$LIMIT_GB)*100}")
+    RX_FMT=\$(awk "BEGIN{printf \\"%.2f\\", \$RX_GB}")
+    TX_FMT=\$(awk "BEGIN{printf \\"%.2f\\", \$TX_GB}")
+    PCT=\$(awk "BEGIN{printf \\"%.1f\\", \$RX_GB/\$LIMIT_GB*100}")
 
-TC_OUT=$(tc qdisc show dev "$IFACE" 2>/dev/null)
-if echo "$TC_OUT" | grep -q "tbf"; then
-LIMIT_STATE="${GREEN}✅ 正在限速${RESET}"
-CUR_RATE=$(echo "$TC_OUT" | grep -oP 'rate \K\S+')
-else
-LIMIT_STATE="${YELLOW}🆗 未限速${RESET}"
-CUR_RATE="-"
-fi
+    # Check the current limit status with 'tc'
+    TC_OUT=\$(tc qdisc show dev "\$IFACE")
+    if echo "\$TC_OUT" | grep -q "tbf"; then
+        LIMIT_STATE="\${GREEN}✅ Throttled\${RESET}"
+        CUR_RATE=\$(echo "\$TC_OUT" | grep -oP 'rate \\K\\S+')
+    else
+        LIMIT_STATE="\${YELLOW}🆗 Normal\${RESET}"
+        CUR_RATE="-"
+    fi
 
-clear
-echo -e "${CYAN}╔════════════════════════════════════════════════╗"
-echo -e "║ 🚦 流量限速管理控制台（ce） v${VERSION} ║"
-echo -e "╚════════════════════════════════════════════════╝${RESET}"
-echo -e "${YELLOW}📅 日期：${DATE} 🖥 系统：${OS_INFO}${RESET}"
-echo -e "${YELLOW}🌐 网卡：${IFACE} 公网 IP：${IP4}${RESET}"
-echo -e "${GREEN}📊 今日流量：上行 ${TX_FMT} GiB / 下行 ${RX_FMT} GiB${RESET}"
-echo -e "${GREEN}📈 已用：${RX_FMT} GiB / ${LIMIT_GB} GiB (${PCT}%)${RESET}"
-echo -e "${GREEN}🚦 状态：${LIMIT_STATE} 🚀 速率：${CUR_RATE}${RESET}"
-echo -e "${GREEN}🕒 上次检测：${LAST_RUN}${RESET}"
+    # Display the dashboard
+    clear
+    echo -e "\${CYAN}╔════════════════════════════════════════════════╗"
+    echo -e "║ 🚦 Traffic Limit Console (ce) v\${VERSION}     ║"
+    echo -e "╚════════════════════════════════════════════════╝\${RESET}"
+    echo -e "\${YELLOW}📅 Date: \${DATE} 🖥️ System: \${OS_INFO}\${RESET}"
+    echo -e "\${YELLOW}🌐 Interface: \${IFACE} Public IP: \${IP4}\${RESET}"
+    echo -e "\${GREEN}📊 Today's Traffic: Upload \${TX_FMT} GiB / Download \${RX_FMT} GiB\${RESET}"
+    echo -e "\${GREEN}📈 Usage: \${RX_FMT} GiB / \${LIMIT_GB} GiB (\${PCT}%)\${RESET}"
+    echo -e "\${GREEN}🚦 Status: \${LIMIT_STATE} 🚀 Rate: \${CUR_RATE}\${RESET}"
+    echo -e "\${GREEN}🕒 Last Check: \${LAST_RUN}\${RESET}"
 
-# Ensure REPO variable is used here to avoid hardcoding and potential errors
-LATEST=$(curl -s "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" | grep '^VERSION=' | cut -d'"' -f2)
-if [[ "$LATEST" != "$VERSION" ]]; then
-echo -e "${RED}⚠ 检测到 install_limit.sh 有新版本（$LATEST），建议运行：ce --update 进行更新。${RESET}"
-fi
+    # Check for script updates in the background
+    LATEST=\$(curl -s "https://raw.githubusercontent.com/\$REPO/main/install_limit.sh" | grep '^VERSION=' | head -n1 | cut -d'"' -f2)
+    if [[ "\$LATEST" != "" && "\$LATEST" != "\$VERSION" ]]; then
+        echo -e "\${RED}⚠️ New version available (\$LATEST). Run 'ce --update' to get it.\${RESET}"
+    fi
 
-echo
-echo -e "${GREEN}1.${RESET} 检查是否应限速"
-echo -e "${GREEN}2.${RESET} 手动解除限速"
-echo -e "${GREEN}3.${RESET} 查看限速状态"
-echo -e "${GREEN}4.${RESET} 查看每日流量"
-echo -e "${GREEN}5.${RESET} 删除限速脚本"
-echo -e "${GREEN}6.${RESET} 修改限速配置"
-echo -e "${GREEN}7.${RESET} 退出"
-echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
-echo -e "${GREEN}9.${RESET} 网络测速"
-echo
-read -p "👉 请选择操作 [1-9]: " opt
-case "$opt" in
-1) /root/limit_bandwidth.sh ;;
-2) /root/clear_limit.sh ;;
-3) tc -s qdisc ls dev "$IFACE" ;;
-4) vnstat -d ;;
-5)
-rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh /root/speed_test.sh
-rm -f /usr/local/bin/ce
-crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh|speed_test.sh' | crontab -
-echo -e "${YELLOW}已删除所有脚本和 cron 任务${RESET}"
-break ;;
-6)
-echo -e "
-当前配置：每日流量限额 ${LIMIT_GB}GiB，限速速率 ${LIMIT_RATE}"
-read -p "🔧 请输入新的每日流量限额（GiB，例如：30）: " ngb
-read -p "🚀 请输入新的限速速率（例如：512kbit 或 1mbit）: " nrt
-if [[ "$ngb" =~ ^[0-9]+$ ]] && [[ "$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
-echo "LIMIT_GB=$ngb" > "$CONFIG_FILE"
-echo "LIMIT_RATE=$nrt" >> "$CONFIG_FILE"
-source "$CONFIG_FILE"
-echo -e "${GREEN}配置已更新！${RESET}"
-else
-echo -e "${RED}输入无效，请检查流量值是否为数字，速率格式是否正确（如 512kbit, 1mbit）。${RESET}"
-fi
-;;
-7) break ;;
-8) /root/install_limit.sh --update ;;
-9) /root/speed_test.sh ;;
-*) echo -e "${RED}无效选项，请重新输入。${RESET}" ;;
-esac
-read -p "⏎ 按回车键继续..." dummy
+    echo
+    echo -e "\${GREEN}1.\${RESET} Force usage check"
+    echo -e "\${GREEN}2.\${RESET} Manually remove limit"
+    echo -e "\${GREEN}3.\${RESET} Show kernel limit status"
+    echo -e "\${GREEN}4.\${RESET} Show daily traffic stats"
+    echo -e "\${GREEN}5.\${RESET} Uninstall all scripts"
+    echo -e "\${GREEN}6.\${RESET} Modify limit settings"
+    echo -e "\${GREEN}7.\${RESET} Exit"
+    echo -e "\${GREEN}8.\${RESET} Check for updates"
+    echo -e "\${GREEN}9.\${RESET} Run network speed test"
+    echo -e "\${GREEN}10.\${RESET} View cron log"
+    echo
+    read -p "👉 Choose an option [1-10]: " opt
+    case "\$opt" in
+        1) /root/limit_bandwidth.sh ;;
+        2) /root/clear_limit.sh ;;
+        3) tc -s qdisc ls dev "\$IFACE" ;;
+        4) vnstat -d ;;
+        5)
+            read -p "Are you sure you want to remove everything? [y/N] " confirm
+            if [[ "\$confirm" =~ ^[Yy]\$ ]]; then
+                rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh /root/speed_test.sh
+                rm -f /usr/local/bin/ce
+                (crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' | crontab -)
+                echo -e "\${YELLOW}All scripts and cron jobs have been removed.\${RESET}"
+                break
+            fi
+            ;;
+        6)
+            echo -e "\\nCurrent Config: Daily limit \${LIMIT_GB}GiB, Throttle rate \${LIMIT_RATE}"
+            read -p "🔧 Enter new daily limit (GiB, e.g., 30): " ngb
+            read -p "🚀 Enter new throttle rate (e.g., 512kbit or 1mbit): " nrt
+            if [[ "\$ngb" =~ ^[0-9]+([.][0-9]+)?\$ ]] && [[ "\$nrt" =~ ^[0-9]+(kbit|mbit)\$ ]]; then
+                echo "LIMIT_GB=\$ngb" > "\$CONFIG_FILE"
+                echo "LIMIT_RATE=\$nrt" >> "\$CONFIG_FILE"
+                source "\$CONFIG_FILE"
+                echo -e "\${GREEN}Configuration updated!\${RESET}"
+            else
+                echo -e "\${RED}Invalid input. Check if the limit is a number and the rate is correct (e.g., 512kbit, 1mbit).\${RESET}"
+            fi
+            ;;
+        7) break ;;
+        8) "$SCRIPT_PATH" --update ;;
+        9) /root/speed_test.sh ;;
+        10) tail -n 20 "$LOG_FILE" ;;
+        *) echo -e "\${RED}Invalid option, please try again.\${RESET}" ;;
+    esac
+    read -p "⏎ Press Enter to continue..." dummy
 done
 EOF
 
 chmod +x /usr/local/bin/ce
 
-echo -e "${GREEN}🎉 安装完成！现在可以使用命令：ce 或 ce --update 来管理限速系统。${RESET}"
+echo -e "${GREEN}🎉 Installation complete! You can now use the 'ce' command to manage the traffic limiter.${RESET}"
 
