@@ -3,7 +3,7 @@ set -e
 
 # ====== 基础信息 ======
 
-VERSION="1.0.5" # 更新版本号
+VERSION="1.0.6" # 更新版本号
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
@@ -96,12 +96,14 @@ else
 fi
 
 echo "✅ [2/6] 初始化 vnStat..."
-# 确保 vnstat 数据库文件存在并初始化接口
-# 尝试使用 --update -i，解决 -u 参数不被支持的问题
-vnstat --update -i "$IFACE" || true
+# 对于 vnStat 2.x 版本，使用 --add 创建数据库，如果已存在则无害
+vnstat --add -i "$IFACE" 2>/dev/null || true
 sleep 2
 systemctl enable vnstat
 systemctl restart vnstat
+# 确保 vnstat 服务启动后进行一次数据更新
+vnstat --update -i "$IFACE" 2>/dev/null || true
+
 
 echo "📝 [3/6] 生成限速脚本..."
 cat > /root/limit_bandwidth.sh <<EOL
@@ -167,7 +169,7 @@ chmod +x /root/clear_limit.sh
 echo "📅 [5/6] 写入 cron 任务..."
 crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-# 解决 cron 任务中 vnstat 更新的 -u 参数问题
+# 针对 vnStat 2.x，清空数据库后，使用 --update 刷新数据
 echo "0 0 * * * /root/clear_limit.sh && vnstat --update -i \$IFACE && vnstat --update" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
