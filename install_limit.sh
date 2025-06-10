@@ -2,7 +2,7 @@
 set -e
 
 # ====== 基础信息 ======
-VERSION="1.0.5" # 更新版本号以反映修复
+VERSION="1.0.4" # 更新版本号
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
@@ -66,7 +66,7 @@ else
 fi
 echo "系统：$OS_NAME $OS_VER"
 
-IFACE=$(ip -o link show | awk -F': ' '{print \$2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 if [ -z "$IFACE" ]; then
   echo "⚠️ 未检测到网卡，请手动设置 IFACE"
   exit 1
@@ -83,17 +83,10 @@ else
 fi
 
 echo "✅ [2/6] 初始化 vnStat..."
-# 检查 vnStat 数据库是否已存在，如果不存在则创建
-DB_PATH="/var/lib/vnstat/$IFACE"
-if [ ! -f "$DB_PATH" ]; then
-  echo "ℹ️ vnStat 数据库不存在，正在为网卡 '$IFACE' 创建数据库..."
-  vnstat --create -i "$IFACE" || { echo "❌ 无法创建 vnStat 数据库，请检查 vnstat 安装或权限。"; exit 1; }
-  sleep 2 # 给予 vnStat 一些时间来创建数据库文件
-fi
+vnstat -u -i "$IFACE" || true # 初始化数据库，如果已存在则忽略
+sleep 2 # 给予vnstat一些时间来创建数据库文件
 systemctl enable vnstat
 systemctl restart vnstat
-echo "✅ vnStat 服务已启动并初始化。"
-
 
 echo "📝 [3/6] 生成限速脚本..."
 cat > /root/limit_bandwidth.sh <<EOL
@@ -292,4 +285,3 @@ EOF
 chmod +x /usr/local/bin/ce
 
 echo "🎉 安装完成！现在可以使用命令：${GREEN}ce${RESET} 来管理流量限速。"
-
