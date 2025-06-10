@@ -2,7 +2,7 @@
 set -e
 
 # ====== 基础信息 ======
-VERSION="1.0.5" # 更新版本号
+VERSION="1.0.5" # 更新版本号以反映修复
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
@@ -82,12 +82,18 @@ else
   echo "⚠️ 未知包管理器，请手动安装 vnstat、iproute2、speedtest-cli"
 fi
 
-echo "✅ [2/6] 初始化 vnStat 服务..."
-# 移除 vnstat -u -i "$IFACE" 因为新版本不再需要此参数
-# 新版本 vnStat 在服务启动时会自动处理数据库初始化
+echo "✅ [2/6] 初始化 vnStat..."
+# 检查 vnStat 数据库是否已存在，如果不存在则创建
+DB_PATH="/var/lib/vnstat/$IFACE"
+if [ ! -f "$DB_PATH" ]; then
+  echo "ℹ️ vnStat 数据库不存在，正在为网卡 '$IFACE' 创建数据库..."
+  vnstat --create -i "$IFACE" || { echo "❌ 无法创建 vnStat 数据库，请检查 vnstat 安装或权限。"; exit 1; }
+  sleep 2 # 给予 vnStat 一些时间来创建数据库文件
+fi
 systemctl enable vnstat
 systemctl restart vnstat
-echo "✅ vnStat 服务已启动并启用"
+echo "✅ vnStat 服务已启动并初始化。"
+
 
 echo "📝 [3/6] 生成限速脚本..."
 cat > /root/limit_bandwidth.sh <<EOL
@@ -149,7 +155,7 @@ crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/cro
 # 每小时的第0分钟执行检查和限速
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
 # 每天的0点0分执行解除限速、更新vnstat数据库和统计
-echo "0 0 * * * /root/clear_limit.sh && vnstat --update -i $IFACE" >> /tmp/crontab.bak # 使用 --update 代替 -u
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -195,29 +201,29 @@ while true; do
   IP4=$(curl -s ifconfig.me || echo "未知") # 获取公网 IP
   LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A") # 读取上次限速脚本运行时间
 
-  LINE=\$(vnstat -d -i "$IFACE" | grep "$DATE")
+  LINE=$(vnstat -d -i "$IFACE" | grep "$DATE")
   if [[ -z "$LINE" ]]; then
     RX_GB=0.00; TX_GB=0.00 # 如果当天没有流量数据，则初始化为 0
   else
     # 从 vnstat 输出中解析接收和发送流量及其单位
-    RX=\$(echo "\$LINE" | awk '{print \$3}')
-    RX_UNIT=\$(echo "\$LINE" | awk '{print \$4}')
-    TX=\$(echo "\$LINE" | awk '{print \$5}')
-    TX_UNIT=\$(echo "\$LINE" | awk '{print \$6}')
+    RX=$(echo "$LINE" | awk '{print \$3}')
+    RX_UNIT=$(echo "$LINE" | awk '{print \$4}')
+    TX=$(echo "$LINE" | awk '{print \$5}')
+    TX_UNIT=$(echo "$LINE" | awk '{print \$6}')
 
     # 将接收和发送流量统一转换为 GiB
-    RX_GB=\$(convert_to_gib "\$RX" "\$RX_UNIT")
-    TX_GB=\$(convert_to_gib "\$TX" "\$TX_UNIT")
+    RX_GB=$(convert_to_gib "$RX" "$RX_UNIT")
+    TX_GB=$(convert_to_gib "$TX" "$TX_UNIT")
   fi
 
   # 计算流量使用百分比
-  PCT=\$(awk -v u="\${RX_GB}" -v l="\${LIMIT_GB}" 'BEGIN{printf "%.1f", u/l*100}')
+  PCT=$(awk -v u="$RX_GB" -v l="$LIMIT_GB" 'BEGIN{printf "%.1f", u/l*100}')
 
   # 检查当前限速状态
-  TC_OUT=\$(tc qdisc show dev "$IFACE")
-  if echo "\$TC_OUT" | grep -q "tbf"; then
+  TC_OUT=$(tc qdisc show dev "$IFACE")
+  if echo "$TC_OUT" | grep -q "tbf"; then
     LIMIT_STATE="${GREEN}✅ 正在限速${RESET}"
-    CUR_RATE=\$(echo "\$TC_OUT" | grep -oP 'rate \K\S+') # 从 tc 输出中提取当前限速速率
+    CUR_RATE=$(echo "$TC_OUT" | grep -oP 'rate \K\S+') # 从 tc 输出中提取当前限速速率
   else
     LIMIT_STATE="${YELLOW}🆗 未限速${RESET}"
     CUR_RATE="-"
@@ -231,7 +237,7 @@ while true; do
   echo -e "${YELLOW}📅 日期：${DATE}    🖥 系统：${OS_INFO}${RESET}"
   echo -e "${YELLOW}🌐 网卡：${IFACE}    公网 IP：${IP4}${RESET}"
   echo -e "${GREEN}📊 今日流量：上行: ${TX_GB} GiB / 下行: ${RX_GB} GiB${RESET}"
-  echo -e "${GREEN}📈 已用：${RX_GB} GiB / ${LIMIT_GB} GiB (\${PCT}%)${RESET}"
+  echo -e "${GREEN}📈 已用：${RX_GB} GiB / ${LIMIT_GB} GiB (${PCT}%)${RESET}"
   echo -e "${GREEN}🚦 状态：${LIMIT_STATE}    🚀 速率：${CUR_RATE}${RESET}"
   echo -e "${GREEN}🕒 上次检测：${LAST_RUN}${RESET}"
   echo
@@ -246,10 +252,10 @@ while true; do
   echo -e "${GREEN}9.${RESET} 网络测速"
   echo
   read -p "👉 请选择操作 [1-9]: " opt # 读取用户输入
-  case "\$opt" in
+  case "$opt" in
     1) /root/limit_bandwidth.sh ;;  # 调用限速脚本
     2) /root/clear_limit.sh ;;      # 调用解除限速脚本
-    3) tc -s qdisc ls dev "\$IFACE" ;; # 显示 tc 规则
+    3) tc -s qdisc ls dev "$IFACE" ;; # 显示 tc 规则
     4) vnstat -d ;;                 # 显示 vnstat 每日统计
     5)
       # 删除所有相关文件
@@ -265,10 +271,10 @@ while true; do
       read -p "🔧 请输入新的每日流量限额（GiB，例如：30）: " ngb
       read -p "🚀 请输入新的限速速率（例如：512kbit 或 1mbit）: " nrt
       # 验证输入格式
-      if [[ "\$ngb" =~ ^[0-9]+$ ]] && [[ "\$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
-        echo "LIMIT_GB=\$ngb" > "\$CONFIG_FILE"
-        echo "LIMIT_RATE=\$nrt" >> "\$CONFIG_FILE"
-        source "\$CONFIG_FILE" # 重新加载配置
+      if [[ "$ngb" =~ ^[0-9]+$ ]] && [[ "$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
+        echo "LIMIT_GB=$ngb" > "$CONFIG_FILE"
+        echo "LIMIT_RATE=$nrt" >> "$CONFIG_FILE"
+        source "$CONFIG_FILE" # 重新加载配置
         echo -e "${GREEN}配置已更新！${RESET}"
       else
         echo -e "${RED}输入无效，请检查流量值是否为数字，速率格式是否正确（如 512kbit, 1mbit）。${RESET}"
