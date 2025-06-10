@@ -86,8 +86,9 @@ else
 fi
 
 echo "✅ [2/6] 初始化 vnStat..."
-vnstat --add -i "$IFACE" || true    # 初始化数据库，如果已存在则忽略
-sleep 2                             # 给予一些时间创建数据库文件
+# 用 --add 初始化数据库，如果已经存在则忽略
+vnstat --add -i "$IFACE" || true
+sleep 2
 systemctl enable vnstat
 systemctl restart vnstat
 
@@ -98,12 +99,10 @@ IFACE="$IFACE"
 CONFIG_FILE=/etc/limit_config.conf
 source "$CONFIG_FILE"
 
-# 获取当天的流量数据
 LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')")
 RX=$(echo "$LINE" | awk '{print $3}')
 UNIT=$(echo "$LINE" | awk '{print $4}')
 
-# 统一将接收流量转换为 GiB
 if [[ "$UNIT" == "KiB" ]]; then
   RX=$(awk "BEGIN {printf \"%.2f\", $RX / 1024 / 1024}")
 elif [[ "$UNIT" == "MiB" ]]; then
@@ -134,7 +133,7 @@ EOL
 chmod +x /root/limit_bandwidth.sh
 
 echo "📝 [4/6] 生成解除限速脚本..."
-cat > /root/clear_limit.sh <<'EOL'
+cat > /root/clear_limit.sh <<EOL
 #!/bin/bash
 IFACE="$IFACE"
 tc qdisc del dev "$IFACE" root 2>/dev/null || true
@@ -142,12 +141,13 @@ EOL
 chmod +x /root/clear_limit.sh
 
 echo "📅 [5/6] 写入 cron 任务..."
+# 清除旧的 cron 任务
 crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
 
-# 每小时检查限速
+# 每小时检查并限速
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-# 每日凌晨更新 vnStat（必要时添加接口）并解除限速
-echo "0 0 * * * /root/clear_limit.sh && vnstat --add -i $IFACE 2>/dev/null; vnstat --update -i $IFACE" >> /tmp/crontab.bak
+# 每天凌晨更新 vnStat 数据库并清除限速
+echo "0 0 * * * /root/clear_limit.sh && vnstat --update -i $IFACE" >> /tmp/crontab.bak
 
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
@@ -173,15 +173,15 @@ IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
   | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 
 convert_to_gib() {
-  local value="$1" unit="$2"
+  local value="$1"; local unit="$2"
   if [[ "$unit" == "KiB" ]]; then
-    awk "BEGIN {printf \"%.2f\", $value/1024/1024}"
+    awk "BEGIN {printf \"%.2f\", $value / 1024 / 1024}"
   elif [[ "$unit" == "MiB" ]]; then
-    awk "BEGIN {printf \"%.2f\", $value/1024}"
+    awk "BEGIN {printf \"%.2f\", $value / 1024}"
   elif [[ "$unit" == "GiB" ]]; then
     echo "$value"
   elif [[ "$unit" == "TiB" ]]; then
-    awk "BEGIN {printf \"%.2f\", $value*1024}"
+    awk "BEGIN {printf \"%.2f\", $value * 1024}"
   else
     echo "0.00"
   fi
@@ -197,16 +197,12 @@ while true; do
   if [[ -z "$LINE" ]]; then
     RX_GB=0.00; TX_GB=0.00
   else
-    RX=$(echo "$LINE" | awk '{print $3}')
-    RX_UNIT=$(echo "$LINE" | awk '{print $4}')
-    TX=$(echo "$LINE" | awk '{print $5}')
-    TX_UNIT=$(echo "$LINE" | awk '{print $6}')
-    RX_GB=$(convert_to_gib "$RX" "$RX_UNIT")
-    TX_GB=$(convert_to_gib "$TX" "$TX_UNIT")
+    RX=$(echo "$LINE" | awk '{print $3}'); RX_UNIT=$(echo "$LINE" | awk '{print $4}')
+    TX=$(echo "$LINE" | awk '{print $5}'); TX_UNIT=$(echo "$LINE" | awk '{print $6}')
+    RX_GB=$(convert_to_gib "$RX" "$RX_UNIT"); TX_GB=$(convert_to_gib "$TX" "$TX_UNIT")
   fi
 
   PCT=$(awk -v u="$RX_GB" -v l="$LIMIT_GB" 'BEGIN{printf "%.1f", u/l*100}')
-
   TC_OUT=$(tc qdisc show dev "$IFACE")
   if echo "$TC_OUT" | grep -q "tbf"; then
     LIMIT_STATE="${GREEN}✅ 正在限速${RESET}"
@@ -251,8 +247,7 @@ while true; do
       break
       ;;
     6)
-      echo -e "
-当前配置：每日流量限额 ${LIMIT_GB}GiB，限速速率 ${LIMIT_RATE}"
+      echo -e "当前配置：每日流量限额 ${LIMIT_GB}GiB，限速速率 ${LIMIT_RATE}"
       read -p "🔧 请输入新的每日流量限额（GiB，例如：30）: " ngb
       read -p "🚀 请输入新的限速速率（例如：512kbit 或 1mbit）: " nrt
       if [[ "$ngb" =~ ^[0-9]+$ ]] && [[ "$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
@@ -261,7 +256,7 @@ while true; do
         source "$CONFIG_FILE"
         echo -e "${GREEN}配置已更新！${RESET}"
       else
-        echo -e "${RED}输入无效，请检查格式${RESET}"
+        echo -e "${RED}输入无效，请检查流量值和速率格式。${RESET}"
       fi
       ;;
     7) break ;;
@@ -272,6 +267,7 @@ while true; do
   read -p "⏎ 按回车键继续..." dummy
 done
 EOF
+
 chmod +x /usr/local/bin/ce
 
 echo "🎉 安装完成！现在可以使用命令：${GREEN}ce${RESET} 来管理流量限速。"
