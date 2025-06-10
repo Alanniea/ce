@@ -105,38 +105,51 @@ systemctl restart vnstat # 确保 vnStat 服务正在运行
 
 echo "📝 [3/6] 生成限速脚本..."
 # 生成限速逻辑脚本
-cat > /root/limit_bandwidth.sh <<EOL
+cat > /root/limit_bandwidth.sh <<'EOL'
 #!/bin/bash
 IFACE="$IFACE"
 CONFIG_FILE=/etc/limit_config.conf
 source "$CONFIG_FILE" # 加载限速配置
 
-LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')")
-# 提取今日接收流量和单位
-RX=$(echo "$LINE" | awk '{print \$3}')
-UNIT=$(echo "$LINE" | awk '{print \$4}')
+LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')" | head -n1)
 
-# 如果单位是 MiB，则转换为 GiB
-if [[ "$UNIT" == "MiB" ]]; then
-    # 修正：确保 awk 仅处理数字部分
-    RX=$(echo "\$RX" | awk '{printf "%.2f", \$1 / 1024}')
+# 初始化流量值和单位
+RX_VALUE=0
+RX_UNIT="GiB" # 默认单位为 GiB
+
+if [[ -n "$LINE" ]]; then
+    # 从 vnstat 输出中提取接收流量值和单位，并确保流量值是纯数字
+    CURRENT_RX_VAL=$(echo "$LINE" | awk '{print $3}' | tr -cd '0-9.')
+    CURRENT_RX_UNIT=$(echo "$LINE" | awk '{print $4}')
+    
+    if [[ -n "$CURRENT_RX_VAL" ]]; then # 如果成功提取到数值
+        RX_VALUE="$CURRENT_RX_VAL"
+        RX_UNIT="$CURRENT_RX_UNIT"
+    fi
 fi
-# 将流量使用量转换为整数以便比较
-USAGE_INT=$(printf "%.0f" "\$RX")
+
+# 将 RX_VALUE 统一转换为 GiB
+if [[ "$RX_UNIT" == "MiB" ]]; then
+    RX_GB=$(awk "BEGIN {printf \"%.2f\", $RX_VALUE / 1024}")
+else
+    RX_GB="$RX_VALUE" # 如果是 GiB 或其他，直接使用
+fi
+
+# 将流量使用量转换为整数以便比较，确保 printf 收到的是数字
+USAGE_INT=$(printf "%.0f" "$RX_GB")
 
 # 判断是否达到限速阈值
 if (( USAGE_INT >= LIMIT_GB )); then
-    PCT=\$\$(( USAGE_INT * 100 / LIMIT_GB ))
-    echo "[限速] \${USAGE_INT}GiB(\${PCT}%) → 开始限速"
-    # 删除旧的限速规则（如果存在）
-    tc qdisc del dev "\$IFACE" root 2>/dev/null || true
-    # 添加新的限速规则
-    tc qdisc add dev "\$IFACE" root tbf rate "\$LIMIT_RATE" burst 32kbit latency 400ms
+    PCT=$(( USAGE_INT * 100 / LIMIT_GB ))
+    echo "[限速] ${USAGE_INT}GiB(${PCT}%) → 开始限速"
+    # 删除旧的限速规则（如果存在），然后添加新的限速规则
+    tc qdisc del dev "$IFACE" root 2>/dev/null || true
+    tc qdisc add dev "$IFACE" root tbf rate "$LIMIT_RATE" burst 32kbit latency 400ms
 else
-    PCT=\$\$(( USAGE_INT * 100 / LIMIT_GB ))
-    echo "[正常] \${USAGE_INT}GiB(\${PCT}%)"
-    # 如果未限速，确保没有限速规则
-    tc qdisc del dev "\$IFACE" root 2>/dev/null || true
+    PCT=$(( USAGE_INT * 100 / LIMIT_GB ))
+    echo "[正常] ${USAGE_INT}GiB(${PCT}%)"
+    # 流量正常时，确保没有限速规则（可选，但通常在 clear_limit.sh 中处理）
+    # tc qdisc del dev "$IFACE" root 2>/dev/null || true # 移除此行，避免不必要的操作
 fi
 
 # 记录上次运行时间
@@ -191,21 +204,44 @@ while true; do
     IP4=$(curl -s ifconfig.me || echo "未知") # 获取公网 IP
     LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A") # 获取上次限速检测时间
 
-    LINE=$(vnstat -d -i "$IFACE" | grep "$DATE")
-    if [[ -z "$LINE" ]]; then
-        RX_GB=0; TX_GB=0 # 如果今天没有流量数据，则设置为 0
+    LINE=$(vnstat -d -i "$IFACE" | grep "$DATE" | head -n1)
+
+    # 初始化流量值和单位
+    RX_VALUE=0
+    RX_UNIT="GiB"
+    TX_VALUE=0
+    TX_UNIT="GiB"
+
+    if [[ -n "$LINE" ]]; then
+        # 提取接收流量值和单位
+        CURRENT_RX_VAL=$(echo "$LINE" | awk '{print $3}' | tr -cd '0-9.')
+        CURRENT_RX_UNIT=$(echo "$LINE" | awk '{print $4}')
+        # 提取发送流量值和单位
+        CURRENT_TX_VAL=$(echo "$LINE" | awk '{print $5}' | tr -cd '0-9.')
+        CURRENT_TX_UNIT=$(echo "$LINE" | awk '{print $6}')
+
+        if [[ -n "$CURRENT_RX_VAL" ]]; then
+            RX_VALUE="$CURRENT_RX_VAL"
+            RX_UNIT="$CURRENT_RX_UNIT"
+        fi
+        if [[ -n "$CURRENT_TX_VAL" ]]; then
+            TX_VALUE="$CURRENT_TX_VAL"
+            TX_UNIT="$CURRENT_TX_UNIT"
+        fi
+    fi
+
+    # 将接收流量统一转换为 GiB
+    if [[ "$RX_UNIT" == "MiB" ]]; then
+        RX_GB=$(awk "BEGIN {printf \"%.2f\", $RX_VALUE / 1024}")
     else
-        RX=$(echo "$LINE" | awk '{print $3}')
-        RX_UNIT=$(echo "$LINE" | awk '{print $4}')
-        TX=$(echo "$LINE" | awk '{print $5}')
-        TX_UNIT=$(echo "$LINE" | awk '{print $6}')
+        RX_GB="$RX_VALUE"
+    fi
 
-        RX_GB=$RX  
-        TX_GB=$TX  
-        # 修正：确保 awk 仅处理数字部分进行 MiB 到 GiB 的转换
-        [[ "$RX_UNIT" == "MiB" ]] && RX_GB=$(echo "$RX" | awk '{printf "%.2f", $1/1024}')  
-        [[ "$TX_UNIT" == "MiB" ]] && TX_GB=$(echo "$TX" | awk '{printf "%.2f", $1/1024}')
-
+    # 将发送流量统一转换为 GiB
+    if [[ "$TX_UNIT" == "MiB" ]]; then
+        TX_GB=$(awk "BEGIN {printf \"%.2f\", $TX_VALUE / 1024}")
+    else
+        TX_GB="$TX_VALUE"
     fi
 
     UP_STR="上行: ${TX_GB:-0} GiB"
@@ -249,7 +285,7 @@ while true; do
         3) tc -s qdisc ls dev "$IFACE" ;; # 查看限速状态详情
         4) vnstat -d ;;                 # 查看每日流量详情
         5) # 删除所有脚本和命令
-            rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh
+            rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh /root/speed_test.sh
             rm -f /usr/local/bin/ce
             # 清除 cron 任务中与本脚本相关的行
             (crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh') | crontab -
