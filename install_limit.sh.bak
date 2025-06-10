@@ -3,7 +3,7 @@ set -e
 
 # ====== 基础信息 ======
 
-VERSION="1.0.5" # 更新版本号
+VERSION="1.0.4" # 更新版本号
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
@@ -97,8 +97,7 @@ fi
 
 echo "✅ [2/6] 初始化 vnStat..."
 # 确保 vnstat 数据库文件存在并初始化接口
-# 尝试使用 --update -i，解决 -u 参数不被支持的问题
-vnstat --update -i "$IFACE" || true
+vnstat -u -i "$IFACE" || true
 sleep 2
 systemctl enable vnstat
 systemctl restart vnstat
@@ -167,8 +166,7 @@ chmod +x /root/clear_limit.sh
 echo "📅 [5/6] 写入 cron 任务..."
 crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
 echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
-# 解决 cron 任务中 vnstat 更新的 -u 参数问题
-echo "0 0 * * * /root/clear_limit.sh && vnstat --update -i \$IFACE && vnstat --update" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i \$IFACE && vnstat --update" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -189,7 +187,7 @@ CYAN='\033[1;36m'; RESET='\033[0m'
 CONFIG_FILE=/etc/limit_config.conf
 source "$CONFIG_FILE"
 VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print \$2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 
 while true; do
 DATE=$(date '+%Y-%m-%d')
@@ -198,53 +196,53 @@ IP4=$(curl -s ifconfig.me || echo "N/A")
 LAST_RUN=$(cat /var/log/limit_last_run 2>/dev/null || echo "N/A")
 
 # 获取今天的 vnstat 流量数据
-LINE=$(vnstat -d -i "\$IFACE" 2>/dev/null | grep "\$DATE")
+LINE=$(vnstat -d -i "$IFACE" 2>/dev/null | grep "$DATE")
 
 RX_GB_FLOAT=0 # 初始化接收流量（GiB）为浮点数
 TX_GB_FLOAT=0 # 初始化发送流量（GiB）为浮点数
 
-if [[ -n "\$LINE" ]]; then
+if [[ -n "$LINE" ]]; then
     # 提取接收流量值和单位（第3和第4字段）
-    RX_RAW=$(echo "\$LINE" | awk '{print \$3}')
-    RX_UNIT=$(echo "\$LINE" | awk '{print \$4}')
+    RX_RAW=$(echo "$LINE" | awk '{print $3}')
+    RX_UNIT=$(echo "$LINE" | awk '{print $4}')
     
     # 提取发送流量值和单位（第5和第6字段）
-    TX_RAW=$(echo "\$LINE" | awk '{print \$5}')
-    TX_UNIT=$(echo "\$LINE" | awk '{print \$6}')
+    TX_RAW=$(echo "$LINE" | awk '{print $5}')
+    TX_UNIT=$(echo "$LINE" | awk '{print $6}')
 
     # 验证并转换接收流量到 GiB
-    if [[ "\$RX_RAW" =~ ^[0-9]+(\.[0-9]+)?\$ ]]; then
-        if [[ "\$RX_UNIT" == "MiB" ]]; then
-            RX_GB_FLOAT=$(awk -v val="\$RX_RAW" 'BEGIN {printf "%.2f", val / 1024}')
-        elif [[ "\$RX_UNIT" == "KiB" ]]; then
-            RX_GB_FLOAT=$(awk -v val="\$RX_RAW" 'BEGIN {printf "%.2f", val / (1024 * 1024)}')
+    if [[ "$RX_RAW" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        if [[ "$RX_UNIT" == "MiB" ]]; then
+            RX_GB_FLOAT=$(awk -v val="$RX_RAW" 'BEGIN {printf "%.2f", val / 1024}')
+        elif [[ "$RX_UNIT" == "KiB" ]]; then
+            RX_GB_FLOAT=$(awk -v val="$RX_RAW" 'BEGIN {printf "%.2f", val / (1024 * 1024)}')
         else # 默认为 GiB
-            RX_GB_FLOAT=$(awk -v val="\$RX_RAW" 'BEGIN {printf "%.2f", val}')
+            RX_GB_FLOAT=$(awk -v val="$RX_RAW" 'BEGIN {printf "%.2f", val}')
         fi
     fi
 
     # 验证并转换发送流量到 GiB
-    if [[ "\$TX_RAW" =~ ^[0-9]+(\.[0-9]+)?\$ ]]; then
-        if [[ "\$TX_UNIT" == "MiB" ]]; then
-            TX_GB_FLOAT=$(awk -v val="\$TX_RAW" 'BEGIN {printf "%.2f", val / 1024}')
-        elif [[ "\$TX_UNIT" == "KiB" ]]; then
-            TX_GB_FLOAT=$(awk -v val="\$TX_RAW" 'BEGIN {printf "%.2f", val / (1024 * 1024)}')
+    if [[ "$TX_RAW" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        if [[ "$TX_UNIT" == "MiB" ]]; then
+            TX_GB_FLOAT=$(awk -v val="$TX_RAW" 'BEGIN {printf "%.2f", val / 1024}')
+        elif [[ "$TX_UNIT" == "KiB" ]]; then
+            TX_GB_FLOAT=$(awk -v val="$TX_RAW" 'BEGIN {printf "%.2f", val / (1024 * 1024)}')
         else # 默认为 GiB
-            TX_GB_FLOAT=$(awk -v val="\$TX_RAW" 'BEGIN {printf "%.2f", val}')
+            TX_GB_FLOAT=$(awk -v val="$TX_RAW" 'BEGIN {printf "%.2f", val}')
         fi
     fi
 fi
 
-UP_STR="上行: \${TX_GB_FLOAT:-0} GiB" # 使用 :-0 确保为空时显示 0
-DOWN_STR="下行: \${RX_GB_FLOAT:-0} GiB" # 使用 :-0 确保为空时显示 0
+UP_STR="上行: ${TX_GB_FLOAT:-0} GiB" # 使用 :-0 确保为空时显示 0
+DOWN_STR="下行: ${RX_GB_FLOAT:-0} GiB" # 使用 :-0 确保为空时显示 0
 # 计算百分比，确保使用数值且避免除零
-PCT=\$(awk -v u="\${RX_GB_FLOAT:-0}" -v l="\$LIMIT_GB" 'BEGIN{ if (l == 0) print "0.0"; else printf "%.1f", u/l*100 }')
+PCT=$(awk -v u="${RX_GB_FLOAT:-0}" -v l="$LIMIT_GB" 'BEGIN{ if (l == 0) print "0.0"; else printf "%.1f", u/l*100 }')
 
 
-TC_OUT=$(tc qdisc show dev "\$IFACE" 2>/dev/null)
-if echo "\$TC_OUT" | grep -q "tbf"; then
+TC_OUT=$(tc qdisc show dev "$IFACE" 2>/dev/null)
+if echo "$TC_OUT" | grep -q "tbf"; then
     LIMIT_STATE="✅ 正在限速"
-    CUR_RATE=$(echo "\$TC_OUT" | grep -oP 'rate \K\S+' | head -n1) # 获取第一个匹配的速率
+    CUR_RATE=$(echo "$TC_OUT" | grep -oP 'rate \K\S+' | head -n1) # 获取第一个匹配的速率
 else
     LIMIT_STATE="🆗 未限速"
     CUR_RATE="-"
@@ -252,14 +250,14 @@ fi
 
 clear
 echo -e "${CYAN}╔════════════════════════════════════════════════╗"
-echo -e "║        🚦 流量限速管理控制台（ce） v\${VERSION}        ║"
+echo -e "║        🚦 流量限速管理控制台（ce） v${VERSION}        ║"
 echo -e "╚════════════════════════════════════════════════╝${RESET}"
-echo -e "${YELLOW}📅 日期：\${DATE}    🖥 系统：\${OS_INFO}${RESET}"
-echo -e "${YELLOW}🌐 网卡：\${IFACE}    公网 IP：\${IP4}${RESET}"
-echo -e "${GREEN}📊 今日流量：\${UP_STR} / \${DOWN_STR}${RESET}"
-echo -e "${GREEN}📈 已用：\${RX_GB_FLOAT} GiB / \${LIMIT_GB} GiB (\${PCT}%)${RESET}"
-echo -e "${GREEN}🚦 状态：\${LIMIT_STATE}    🚀 速率：\${CUR_RATE}${RESET}"
-echo -e "${GREEN}🕒 上次检测：\${LAST_RUN}${RESET}"
+echo -e "${YELLOW}📅 日期：${DATE}    🖥 系统：${OS_INFO}${RESET}"
+echo -e "${YELLOW}🌐 网卡：${IFACE}    公网 IP：${IP4}${RESET}"
+echo -e "${GREEN}📊 今日流量：${UP_STR} / ${DOWN_STR}${RESET}"
+echo -e "${GREEN}📈 已用：${RX_GB_FLOAT} GiB / ${LIMIT_GB} GiB (${PCT}%)${RESET}"
+echo -e "${GREEN}🚦 状态：${LIMIT_STATE}    🚀 速率：${CUR_RATE}${RESET}"
+echo -e "${GREEN}🕒 上次检测：${LAST_RUN}${RESET}"
 echo
 echo -e "${GREEN}1.${RESET} 检查是否应限速"
 echo -e "${GREEN}2.${RESET} 手动解除限速"
@@ -272,10 +270,10 @@ echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
 echo -e "${GREEN}9.${RESET} 网络测速"
 echo
 read -p "👉 请选择操作 [1-9]: " opt
-case "\$opt" in
+case "$opt" in
     1) /root/limit_bandwidth.sh ;;
     2) /root/clear_limit.sh ;;
-    3) tc -s qdisc ls dev "\$IFACE" ;;
+    3) tc -s qdisc ls dev "$IFACE" ;;
     4) vnstat -d ;;
     5)
         echo -e "${YELLOW}正在删除所有脚本、配置和 cron 任务...${RESET}"
@@ -288,15 +286,15 @@ case "\$opt" in
         break ;;
     6)
         echo -e "
-当前：\${LIMIT_GB}GiB，\${LIMIT_RATE}"
+当前：${LIMIT_GB}GiB，${LIMIT_RATE}"
         read -p "🔧 新每日流量（GiB，仅输入数字）: " ngb
         read -p "🚀 新限速（例如：512kbit, 1mbit）: " nrt
         # 验证输入格式
-        if [[ "\$ngb" =~ ^[0-9]+\$ ]] && [[ "\$nrt" =~ ^[0-9]+(kbit|mbit)\$ ]]; then
-            echo "LIMIT_GB=\$ngb" > "\$CONFIG_FILE"
-            echo "LIMIT_RATE=\$nrt" >> "\$CONFIG_FILE"
+        if [[ "$ngb" =~ ^[0-9]+$ ]] && [[ "$nrt" =~ ^[0-9]+(kbit|mbit)$ ]]; then
+            echo "LIMIT_GB=$ngb" > "$CONFIG_FILE"
+            echo "LIMIT_RATE=$nrt" >> "$CONFIG_FILE"
             echo -e "${GREEN}✅ 配置已更新${RESET}"
-            source "\$CONFIG_FILE" # 立即加载新配置
+            source "$CONFIG_FILE" # 立即加载新配置
         else
             echo -e "${RED}❌ 输入无效。每日流量限额必须是整数，限速必须是数字后跟 'kbit' 或 'mbit' (例如: 512kbit, 1mbit)。${RESET}"
         fi
