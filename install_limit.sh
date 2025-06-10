@@ -2,7 +2,7 @@
 set -e
 
 # ====== 基础信息 ======
-VERSION="1.0.3"
+VERSION="1.0.2"
 REPO="Alanniea/ce"
 SCRIPT_PATH="/root/install_limit.sh"
 CONFIG_FILE=/etc/limit_config.conf
@@ -28,7 +28,8 @@ check_update() {
     echo "🆕 发现新版本: $LATEST，当前版本: $VERSION"
     read -p "是否立即更新？[Y/n] " choice
     if [[ "$choice" =~ ^[Yy]$ || -z "$choice" ]]; then
-      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" -o "$SCRIPT_PATH"
+      curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install_limit.sh" \
+           -o "$SCRIPT_PATH"
       chmod +x "$SCRIPT_PATH"
       echo "✅ 更新完成，请执行 $SCRIPT_PATH 重新安装"
     else
@@ -63,10 +64,7 @@ else
 fi
 echo "系统：$OS_NAME $OS_VER"
 
-IFACE=$(ip -o link show \
-        | awk -F': ' '{print $2}' \
-        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
-        | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 if [ -z "$IFACE" ]; then
   echo "⚠️ 未检测到网卡，请手动设置 IFACE"
   exit 1
@@ -89,29 +87,29 @@ systemctl enable vnstat
 systemctl restart vnstat
 
 echo "📝 [3/6] 生成限速脚本..."
-cat > /root/limit_bandwidth.sh <<'EOL'
+cat > /root/limit_bandwidth.sh <<EOL
 #!/bin/bash
-IFACE="'"$IFACE"'"
+IFACE="$IFACE"
 CONFIG_FILE=/etc/limit_config.conf
-source "$CONFIG_FILE"
+source "\$CONFIG_FILE"
 
-LINE=$(vnstat -d -i "$IFACE" | grep "$(date '+%Y-%m-%d')")
-RX=$(echo "$LINE" | awk '{print $3}')
-RX_UNIT=$(echo "$LINE" | awk '{print $4}')
+LINE=\$(vnstat -d -i "\$IFACE" | grep "\$(date '+%Y-%m-%d')")
+USAGE=\$(echo "\$LINE" | awk '{print \$3}')
+UNIT=\$(echo "\$LINE" | awk '{print \$4}')
 
-if [[ "$RX_UNIT" == "MiB" ]]; then
-  RX=$(awk "BEGIN {printf \"%.2f\", $RX/1024}")
+if [[ "\$UNIT" == "MiB" ]]; then
+  USAGE=\$(awk "BEGIN {printf \"%.2f\", \$USAGE / 1024}")
 fi
-USAGE_INT=$(printf "%.0f" "$RX")
+USAGE_INT=\$(printf "%.0f" "\$USAGE")
 
 if (( USAGE_INT >= LIMIT_GB )); then
-  PCT=$(( USAGE_INT * 100 / LIMIT_GB ))
-  echo "[限速] ${USAGE_INT}GiB(${PCT}%) → 开始限速"
-  tc qdisc del dev "$IFACE" root 2>/dev/null || true
-  tc qdisc add dev "$IFACE" root tbf rate "$LIMIT_RATE" burst 32kbit latency 400ms
+  PCT=\$(( USAGE_INT * 100 / LIMIT_GB ))
+  echo "[限速] \${USAGE_INT}GiB(\${PCT}%) → 开始限速"
+  tc qdisc del dev "\$IFACE" root 2>/dev/null || true
+  tc qdisc add dev "\$IFACE" root tbf rate "\$LIMIT_RATE" burst 32kbit latency 400ms
 else
-  PCT=$(( USAGE_INT * 100 / LIMIT_GB ))
-  echo "[正常] ${USAGE_INT}GiB(${PCT}%)"
+  PCT=\$(( USAGE_INT * 100 / LIMIT_GB ))
+  echo "[正常] \${USAGE_INT}GiB(\${PCT}%)"
 fi
 
 date '+%Y-%m-%d %H:%M:%S' > /var/log/limit_last_run
@@ -122,17 +120,14 @@ echo "📝 [4/6] 生成解除限速脚本..."
 cat > /root/clear_limit.sh <<EOL
 #!/bin/bash
 IFACE="$IFACE"
-tc qdisc del dev "$IFACE" root 2>/dev/null || true
+tc qdisc del dev "\$IFACE" root 2>/dev/null || true
 EOL
 chmod +x /root/clear_limit.sh
 
 echo "📅 [5/6] 写入 cron 任务..."
-crontab -l 2>/dev/null \
-  | grep -vE 'limit_bandwidth.sh|clear_limit.sh' \
-  > /tmp/crontab.bak || true
-echo "0 * * * * /root/limit_bandwidth.sh"  >> /tmp/crontab.bak
-echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" \
-  >> /tmp/crontab.bak
+crontab -l 2>/dev/null | grep -vE 'limit_bandwidth.sh|clear_limit.sh' > /tmp/crontab.bak || true
+echo "0 * * * * /root/limit_bandwidth.sh" >> /tmp/crontab.bak
+echo "0 0 * * * /root/clear_limit.sh && vnstat -u -i $IFACE && vnstat --update" >> /tmp/crontab.bak
 crontab /tmp/crontab.bak
 rm -f /tmp/crontab.bak
 
@@ -142,11 +137,10 @@ cat > /usr/local/bin/ce <<'EOF'
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[1;36m'; RESET='\033[0m'
 
-source /etc/limit_config.conf
+CONFIG_FILE=/etc/limit_config.conf
+source "$CONFIG_FILE"
 VERSION=$(grep '^VERSION=' /root/install_limit.sh | cut -d'"' -f2)
-IFACE=$(ip -o link show | awk -F': ' '{print $2}' \
-        | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' \
-        | head -n1)
+IFACE=$(ip -o link show | awk -F': ' '{print $2}' | grep -vE '^(lo|docker|br-|veth|tun|vmnet|virbr)' | head -n1)
 
 while true; do
   DATE=$(date '+%Y-%m-%d')
@@ -163,7 +157,8 @@ while true; do
     TX=$(echo "$LINE" | awk '{print $5}')
     TX_UNIT=$(echo "$LINE" | awk '{print $6}')
 
-    RX_GB=$RX; TX_GB=$TX
+    RX_GB=$RX
+    TX_GB=$TX
     [[ "$RX_UNIT" == "MiB" ]] && RX_GB=$(awk "BEGIN{printf \"%.2f\", $RX/1024}")
     [[ "$TX_UNIT" == "MiB" ]] && TX_GB=$(awk "BEGIN{printf \"%.2f\", $TX/1024}")
   fi
@@ -200,9 +195,8 @@ while true; do
   echo -e "${GREEN}6.${RESET} 修改限速配置"
   echo -e "${GREEN}7.${RESET} 退出"
   echo -e "${GREEN}8.${RESET} 检查 install_limit.sh 更新"
-  echo -e "${GREEN}9.${RESET} 测试当前网速（需安装 speedtest）"
   echo
-  read -p "👉 请选择操作 [1-9]: " opt
+  read -p "👉 请选择操作 [1-8]: " opt
   case "$opt" in
     1) /root/limit_bandwidth.sh ;;
     2) /root/clear_limit.sh ;;
@@ -212,8 +206,7 @@ while true; do
       rm -f /root/install_limit.sh /root/limit_bandwidth.sh /root/clear_limit.sh
       rm -f /usr/local/bin/ce
       echo -e "${YELLOW}已删除所有脚本${RESET}"
-      break
-      ;;
+      break ;;
     6)
       echo -e "\n当前：${LIMIT_GB}GiB，${LIMIT_RATE}"
       read -p "🔧 新每日流量（GiB）: " ngb
@@ -228,25 +221,6 @@ while true; do
       ;;
     7) break ;;
     8) /root/install_limit.sh --update ;;
-    9)
-      if ! command -v speedtest &>/dev/null; then
-        echo -e "${YELLOW}未检测到 speedtest，正在安装...${RESET}"
-        if command -v apt &>/dev/null; then
-          apt update && apt install -y curl
-          curl -s https://install.speedtest.net/app/cli/install.deb -o /tmp/speedtest.deb
-          dpkg -i /tmp/speedtest.deb
-        elif command -v yum &>/dev/null; then
-          curl -s https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.rpm -o /tmp/speedtest.rpm
-          yum localinstall -y /tmp/speedtest.rpm
-        else
-          echo -e "${RED}未知系统，无法自动安装 speedtest，请手动安装${RESET}"
-          read -p "⏎ 回车继续..." dummy
-          continue
-        fi
-      fi
-      echo -e "${CYAN}🚀 开始测速...${RESET}"
-      speedtest || echo -e "${RED}测速失败，请检查网络${RESET}"
-      ;;
     *) echo -e "${RED}无效${RESET}" ;;
   esac
   read -p "⏎ 回车继续..." dummy
