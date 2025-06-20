@@ -34,12 +34,23 @@ SCRIPT_PATH="/usr/local/bin/ce" # 用户交互快捷命令 (User interactive sho
 INSTALLER_PATH="/usr/local/bin/install_ce.sh" # 安装脚本自身复制到此 (Installer script itself is copied here)
 TRAFFIC_LOG="/var/log/ce-daily-traffic.log" # 流量日志文件 (Traffic log file)
 
-# 默认配置 (Default Configuration)
-DAILY_LIMIT=30 # GB 每日流量限制 (Daily traffic limit in GB)
-SPEED_LIMIT=512 # KB/s 限速速度 (Speed limit in KB/s)
-INTERFACE="" # 网络接口名称，自动检测或手动指定 (Network interface name, auto-detected or manually specified)
-# 每月流量限制，默认为每日限制的10倍 (Monthly traffic limit, defaults to 10 times the daily limit)
-MONTHLY_LIMIT=$(echo "$DAILY_LIMIT * 10" | bc) # GB
+# 全局配置变量 (Global configuration variables, will be loaded from CONFIG_FILE)
+# 用于缓存配置，避免重复文件I/O
+DAILY_LIMIT=
+SPEED_LIMIT=
+MONTHLY_LIMIT=
+INTERFACE=
+LIMIT_ENABLED=
+LAST_RESET_DATE=
+DAILY_START_RX=
+DAILY_START_TX=
+LAST_MONTHLY_RESET_DATE=
+MONTHLY_START_RX=
+MONTHLY_START_TX=
+
+# 缓存系统信息，避免重复调用外部命令
+CACHED_OS_VERSION=""
+CACHED_KERNEL_VERSION=""
 
 # ==============================================================================
 # 核心函数定义 (Core Function Definitions)
@@ -70,10 +81,10 @@ show_progress() {
 # 获取系统信息 (Get system information)
 get_system_info() {
     echo -e "${BLUE}检测系统信息...${NC}" # Detecting system information...
-    OS_VERSION=$(lsb_release -d | cut -f2 || echo "未知")
-    KERNEL_VERSION=$(uname -r || echo "未知")
-    echo -e "${GREEN}系统版本: $OS_VERSION${NC}" # System version:
-    echo -e "${GREEN}内核版本: $KERNEL_VERSION${NC}" # Kernel version:
+    CACHED_OS_VERSION=$(lsb_release -d | cut -f2 || echo "未知")
+    CACHED_KERNEL_VERSION=$(uname -r || echo "未知")
+    echo -e "${GREEN}系统版本: $CACHED_OS_VERSION${NC}" # System version:
+    echo -e "${GREEN}内核版本: $CACHED_KERNEL_VERSION${NC}" # Kernel version:
 }
 
 # 自动检测网卡 (Auto-detect network interface)
@@ -177,6 +188,11 @@ init_daily_counter() {
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     
+    # 直接更新全局变量
+    DAILY_START_RX=$current_rx
+    DAILY_START_TX=$current_tx
+    LAST_RESET_DATE=$today
+
     # 更新配置文件中的起始值和日期 (Update starting values and date in the config file)
     # 使用临时文件进行原子更新，避免并发问题或文件损坏
     sed -i.bak "s/^DAILY_START_RX=.*/DAILY_START_RX=$current_rx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 DAILY_START_RX 失败。"
@@ -193,6 +209,11 @@ init_monthly_counter() {
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     
+    # 直接更新全局变量
+    MONTHLY_START_RX=$current_rx
+    MONTHLY_START_TX=$current_tx
+    LAST_MONTHLY_RESET_DATE=$this_month
+
     # 更新配置文件中的起始值和日期 (Update starting values and date in the config file)
     sed -i.bak "s/^MONTHLY_START_RX=.*/MONTHLY_START_RX=$current_rx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 MONTHLY_START_RX 失败。"
     sed -i.bak "s/^MONTHLY_START_TX=.*/MONTHLY_START_TX=$current_tx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 MONTHLY_START_TX 失败。"
@@ -207,9 +228,9 @@ create_config() {
     local this_month=$(date +%Y-%m)
     # 使用here-document写入配置文件，确保变量被正确展开 (Use here-document to write config file, ensuring variables are expanded correctly)
     cat > "$CONFIG_FILE" << EOF
-DAILY_LIMIT=$DAILY_LIMIT
-SPEED_LIMIT=$SPEED_LIMIT
-MONTHLY_LIMIT=$MONTHLY_LIMIT
+DAILY_LIMIT=${DAILY_LIMIT:-30}
+SPEED_LIMIT=${SPEED_LIMIT:-512}
+MONTHLY_LIMIT=${MONTHLY_LIMIT:-$(echo "${DAILY_LIMIT:-30} * 10" | bc)}
 INTERFACE=$INTERFACE
 LIMIT_ENABLED=false
 LAST_RESET_DATE=$today
@@ -234,6 +255,20 @@ load_config() {
     if [ -f "$CONFIG_FILE" ] && [ -r "$CONFIG_FILE" ]; then
         # shellcheck source=/dev/null
         source "$CONFIG_FILE"
+
+        # 将读取到的值同步到全局变量 (Synchronize read values to global variables)
+        DAILY_LIMIT=${DAILY_LIMIT}
+        SPEED_LIMIT=${SPEED_LIMIT}
+        MONTHLY_LIMIT=${MONTHLY_LIMIT}
+        INTERFACE=${INTERFACE}
+        LIMIT_ENABLED=${LIMIT_ENABLED}
+        LAST_RESET_DATE=${LAST_RESET_DATE}
+        DAILY_START_RX=${DAILY_START_RX}
+        DAILY_START_TX=${DAILY_START_TX}
+        LAST_MONTHLY_RESET_DATE=${LAST_MONTHLY_RESET_DATE}
+        MONTHLY_START_RX=${MONTHLY_START_RX}
+        MONTHLY_START_TX=${MONTHLY_START_TX}
+
     else
         # 如果在交互模式下未找到配置文件，提示用户安装
         if [[ "$*" == *"--interactive"* ]]; then
@@ -301,7 +336,11 @@ get_daily_usage_bytes() {
     if [ "$skip_reset_check" = "false" ]; then
         check_and_reset_daily # 在这里触发每日重置检查
     fi
-    load_config # 确保加载最新配置
+    # load_config # 已在交互模式或主程序入口加载，此处不再重复，除非是独立的外部调用
+    # 确保 INTERFACE 变量已加载，否则重新加载
+    if [ -z "$INTERFACE" ]; then
+        load_config
+    fi
 
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
@@ -325,7 +364,11 @@ get_monthly_usage_bytes() {
     if [ "$skip_reset_check" = "false" ]; then
         check_and_reset_monthly # 在这里触发每月重置检查
     fi
-    load_config # 确保加载最新配置
+    # load_config # 已在交互模式或主程序入口加载，此处不再重复，除非是独立的外部调用
+    # 确保 INTERFACE 变量已加载，否则重新加载
+    if [ -z "$INTERFACE" ]; then
+        load_config
+    fi
 
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
@@ -375,7 +418,7 @@ get_vnstat_daily_bytes() {
         if [ -n "$vnstat_line" ]; then
             local rx_str=$(echo "$vnstat_line" | awk '{print $2}')
             local tx_str=$(echo "$vnstat_line" | awk '{print $3}')
-            vnstat_bytes=$(($(convert_to_bytes "$rx_str") + $(convert_to_bytes "$tx_str")))
+            vnstat_bytes=$(( $(convert_to_bytes "$rx_str") + $(convert_to_bytes "$tx_str") ))
             log_message "INFO" "使用vnStat文本输出获取今日流量: $vnstat_bytes 字节。"
         else
             log_message "WARN" "无法从vnStat文本输出中获取今日流量。"
@@ -417,11 +460,10 @@ get_vnstat_monthly_bytes() {
             # 假设格式：2023-12 | 100.00 GiB | 50.00 GiB | 150.00 GiB | *
             local rx_str=$(echo "$vnstat_line" | awk '{print $2}')
             local tx_str=$(echo "$vnstat_line" | awk '{print $3}')
-            vnstat_bytes=$(($(convert_to_bytes "$rx_str") + $(convert_to_bytes "$tx_str")))
+            vnstat_bytes=$(( $(convert_to_bytes "$rx_str") + $(convert_to_bytes "$tx_str") ))
             log_message "INFO" "使用vnStat文本输出获取当月流量: $vnstat_bytes 字节。"
         else
             log_message "WARN" "无法从vnStat文本输出中获取当月流量。"
-        调
         fi
     fi
     
@@ -463,12 +505,12 @@ format_traffic() {
         return
     fi
 
-    if [ "$bytes" -lt 1024 ]; then
+    if (( bytes < 1024 )); then
         echo "${bytes}B"
-    elif [ "$bytes" -lt 1048576 ]; then
+    elif (( bytes < 1048576 )); then
         local kb=$(echo "scale=2; $bytes / 1024" | bc)
         echo "${kb}KB"
-    elif [ "$bytes" -lt 1073741824 ]; then
+    elif (( bytes < 1073741824 )); then
         local mb=$(echo "scale=2; $bytes / 1024 / 1024" | bc)
         echo "${mb}MB"
     else
@@ -543,6 +585,7 @@ apply_speed_limit() {
        tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
         echo -e "${GREEN}完成${NC}" # Complete
         sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
+        LIMIT_ENABLED="true" # Update cached value
         log_message "INFO" "限速已启用: ${SPEED_LIMIT}KB/s"
         echo -e "${GREEN}限速已启用: ${SPEED_LIMIT}KB/s${NC}" # Speed limit enabled:
         return 0
@@ -566,6 +609,7 @@ remove_speed_limit() {
         log_message "WARN" "删除旧的TC qdisc 失败或不存在。"
     fi
     sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
+    LIMIT_ENABLED="false" # Update cached value
     log_message "INFO" "限速已移除。"
     echo -e "${GREEN}限速已移除${NC}" # Speed limit removed.
 }
@@ -899,6 +943,7 @@ if [ "$current_day" != "$LAST_RESET_DATE" ]; then
     if [ "$LIMIT_ENABLED" = "true" ]; then
         tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC qdisc 失败或不存在。"
         sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
+        # No need to update LIMIT_ENABLED in monitor script, as it's sourced on each run
         log_monitor_message "INFO" "新的一天，自动解除限速。"
     fi
     # Reload configuration, ensure subsequent operations use latest values
@@ -994,7 +1039,7 @@ show_status() {
     echo ""
     
     # 系统信息 (System Information)
-    echo -e "${WHITE}系统版本:${NC} $(lsb_release -d | cut -f2 || echo "未知")" # System version:
+    echo -e "${WHITE}系统版本:${NC} ${CACHED_OS_VERSION:-$(lsb_release -d | cut -f2 || echo "未知")}" # System version: (Use cached value if available)
     echo -e "${WHITE}网络接口:${NC} $INTERFACE" # Network interface:
     echo -e "${WHITE}vnStat版本:${NC} $(vnstat --version 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")" # vnStat version: (Unknown)
     echo -e "${WHITE}更新时间:${NC} $(date '+%Y-%m-%d %H:%M:%S')" # Update time:
@@ -1211,6 +1256,12 @@ uninstall_all() {
 
 # 交互界面 (Interactive Interface)
 interactive_mode() {
+    # 首次进入交互模式时加载配置
+    load_config "--interactive"
+    # 缓存系统信息
+    CACHED_OS_VERSION=$(lsb_release -d | cut -f2 || echo "未知")
+    CACHED_KERNEL_VERSION=$(uname -r || echo "未知")
+
     while true; do
         show_status
         show_menu
@@ -1240,6 +1291,8 @@ interactive_mode() {
                 ;;
             6) # New option for modifying config
                 modify_config
+                # 配置修改后需要重新加载以更新交互界面中的显示
+                load_config "--interactive"
                 read -rp "按回车键继续..." # Press Enter to continue...
                 ;;
             7)
@@ -1313,9 +1366,13 @@ main_install() {
     echo ""
     log_message "INFO" "开始执行主安装程序。"
     
-    get_system_info
+    get_system_info # 获取并缓存系统信息
     detect_interface
     install_dependencies
+    # 在此阶段使用默认值，如果后续modify_config会更新
+    DAILY_LIMIT=30
+    SPEED_LIMIT=512
+    MONTHLY_LIMIT=$(echo "$DAILY_LIMIT * 10" | bc)
     create_config # 创建配置并初始化今日/每月计数器
     create_monitor_service
     create_timer

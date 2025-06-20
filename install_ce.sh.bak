@@ -10,9 +10,9 @@
 # ==============================================================================
 
 # 设置严格模式，提高脚本健壮性 (Set strict mode for script robustness)
-# -e: Exit immediately if a command exits with a non-zero status
-# -u: Treat unset variables as an error and exit
-# -o pipefail: The exit status of a pipeline is the exit status of the last command that failed
+# -e: 遇到命令失败时立即退出 (Exit immediately if a command exits with a non-zero status)
+# -u: 遇到未设置的变量时视为错误并退出 (Treat unset variables as an error and exit)
+# -o pipefail: 管道命令中任何一个命令失败时，整个管道失败 (The exit status of a pipeline is the exit status of the last command that failed)
 set -euo pipefail
 
 # 颜色定义 (Color Definitions)
@@ -30,15 +30,15 @@ CONFIG_FILE="/etc/ce_traffic_limit.conf"
 SERVICE_FILE="/etc/systemd/system/ce-traffic-monitor.service"
 TIMER_FILE="/etc/systemd/system/ce-traffic-monitor.timer"
 MONITOR_SCRIPT="/usr/local/bin/ce-monitor"
-SCRIPT_PATH="/usr/local/bin/ce" # User interactive shortcut command
-INSTALLER_PATH="/usr/local/bin/install_ce.sh" # Installer script itself is copied here
-TRAFFIC_LOG="/var/log/ce-daily-traffic.log" # Traffic log file
+SCRIPT_PATH="/usr/local/bin/ce" # 用户交互快捷命令 (User interactive shortcut command)
+INSTALLER_PATH="/usr/local/bin/install_ce.sh" # 安装脚本自身复制到此 (Installer script itself is copied here)
+TRAFFIC_LOG="/var/log/ce-daily-traffic.log" # 流量日志文件 (Traffic log file)
 
 # 默认配置 (Default Configuration)
-DAILY_LIMIT=30 # Daily traffic limit in GB
-SPEED_LIMIT=512 # Speed limit in KB/s
-INTERFACE="" # Network interface name, auto-detected or manually specified
-# Monthly traffic limit, defaults to 10 times the daily limit
+DAILY_LIMIT=30 # GB 每日流量限制 (Daily traffic limit in GB)
+SPEED_LIMIT=512 # KB/s 限速速度 (Speed limit in KB/s)
+INTERFACE="" # 网络接口名称，自动检测或手动指定 (Network interface name, auto-detected or manually specified)
+# 每月流量限制，默认为每日限制的10倍 (Monthly traffic limit, defaults to 10 times the daily limit)
 MONTHLY_LIMIT=$(echo "$DAILY_LIMIT * 10" | bc) # GB
 
 # ==============================================================================
@@ -50,6 +50,21 @@ log_message() {
     local type="$1" # e.g., INFO, WARN, ERROR
     local message="$2"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ${type}: $message" >> "$TRAFFIC_LOG"
+}
+
+# 显示进度动画 (Show progress animation)
+show_progress() {
+    local pid=$1
+    local delay=0.1
+    local spin_chars="/-\|"
+    local i=0
+    echo -n " "
+    while ps -p "$pid" > /dev/null; do
+        i=$(( (i+1) % 4 ))
+        printf "\b%c" "${spin_chars:$i:1}"
+        sleep "$delay"
+    done
+    printf "\b \b" # Clear spinner
 }
 
 # 获取系统信息 (Get system information)
@@ -64,7 +79,7 @@ get_system_info() {
 # 自动检测网卡 (Auto-detect network interface)
 detect_interface() {
     echo -e "${BLUE}自动检测网络接口...${NC}" # Auto-detecting network interface...
-    # Get the interface for the default route
+    # 获取默认路由的网卡 (Get the interface for the default route)
     INTERFACE=$(ip route | grep default | awk '{print $5}' | head -1 || true)
     if [ -z "$INTERFACE" ]; then
         echo -e "${RED}无法自动检测网卡，请手动选择:${NC}" # Unable to auto-detect interface, please select manually:
@@ -75,7 +90,7 @@ detect_interface() {
             log_message "ERROR" "未输入网卡名称，安装中止。"
             exit 1
         fi
-        # Validate user-entered interface name
+        # 验证用户输入的网卡名称是否有效
         if ! ip link show "$INTERFACE" &>/dev/null; then
             echo -e "${RED}错误: 输入的网卡 '$INTERFACE' 无效，安装中止。${NC}" # Error: Entered interface '$INTERFACE' is invalid, installation aborted.
             log_message "ERROR" "输入的网卡 '$INTERFACE' 无效，安装中止。"
@@ -88,21 +103,26 @@ detect_interface() {
 
 # 安装依赖 (Install dependencies)
 install_dependencies() {
-    echo -e "${BLUE}安装依赖包...${NC}" # Installing dependency packages...
-    apt update || log_message "WARN" "apt update 失败，可能存在网络问题或源配置错误。"
-    if ! apt install -y vnstat iproute2 bc coreutils jq sqlite3; then
+    echo -e "${BLUE}安装依赖包...${NC} (这可能需要一些时间)" # Installing dependency packages... (This may take some time)
+    (
+        apt update && \
+        apt install -y vnstat iproute2 bc coreutils jq sqlite3
+    ) &
+    show_progress $!
+    wait $!
+    if [ $? -ne 0 ]; then
         echo -e "${RED}错误: 依赖包安装失败，请检查网络或apt源。${NC}" # Error: Dependency package installation failed, please check network or apt sources.
         log_message "ERROR" "依赖包安装失败。"
         exit 1
     fi
     
-    # Configure vnStat
+    # 配置vnStat (Configure vnStat)
     if [ -f "/etc/vnstat.conf" ]; then
         cp "/etc/vnstat.conf" "/etc/vnstat.conf.backup" || log_message "WARN" "备份 /etc/vnstat.conf 失败。"
         echo -e "${YELLOW}已备份 /etc/vnstat.conf 到 /etc/vnstat.conf.backup${NC}" # Backed up /etc/vnstat.conf to /etc/vnstat.conf.backup
     fi
     
-    # Modify vnStat configuration for higher precision
+    # 修改vnStat配置以提高精度 (Modify vnStat configuration for higher precision)
     cat > "/etc/vnstat.conf" << 'EOF'
 # vnStat configuration
 DatabaseDir "/var/lib/vnstat"
@@ -135,16 +155,16 @@ Sampletime 5
 EOF
     log_message "INFO" "vnStat 配置已更新。"
 
-    # Start vnstat service
+    # 启动vnstat服务 (Start vnstat service)
     systemctl enable vnstat || log_message "WARN" "启用 vnstat 服务失败。"
     systemctl restart vnstat || log_message "WARN" "重启 vnstat 服务失败。"
     
-    # Add interface to vnstat, create if it doesn't exist
+    # 添加网卡到vnstat，如果网卡不存在则创建 (Add interface to vnstat, create if it doesn't exist)
     vnstat -i "$INTERFACE" --create 2>/dev/null || log_message "WARN" "为接口 $INTERFACE 创建 vnStat 数据库失败或已存在。"
     
-    # Wait for vnStat initialization
+    # 等待vnstat初始化 (Wait for vnStat initialization)
     echo -e "${YELLOW}等待vnStat初始化...${NC}" # Waiting for vnStat initialization...
-    sleep 5 # Reduce wait time, 5 seconds is usually enough
+    sleep 5 # 减少等待时间，通常5秒足够
     
     echo -e "${GREEN}依赖安装完成${NC}" # Dependencies installed.
     log_message "INFO" "所有依赖安装完成。"
@@ -153,14 +173,15 @@ EOF
 # 初始化每日流量计数器 (Initialize daily traffic counter)
 init_daily_counter() {
     local today=$(date +%Y-%m-%d)
-    # Try to read system network interface bytes, default to 0 if failed
+    # 尝试读取系统网卡字节数，如果失败则默认为0 (Try to read system network interface bytes, default to 0 if failed)
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     
-    # Update starting values and date in the config file
-    sed -i "s/^DAILY_START_RX=.*/DAILY_START_RX=$current_rx/" "$CONFIG_FILE" || log_message "ERROR" "更新 DAILY_START_RX 失败。"
-    sed -i "s/^DAILY_START_TX=.*/DAILY_START_TX=$current_tx/" "$CONFIG_FILE" || log_message "ERROR" "更新 DAILY_START_TX 失败。"
-    sed -i "s/^LAST_RESET_DATE=.*/LAST_RESET_DATE=$today/" "$CONFIG_FILE" || log_message "ERROR" "更新 LAST_RESET_DATE 失败。"
+    # 更新配置文件中的起始值和日期 (Update starting values and date in the config file)
+    # 使用临时文件进行原子更新，避免并发问题或文件损坏
+    sed -i.bak "s/^DAILY_START_RX=.*/DAILY_START_RX=$current_rx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 DAILY_START_RX 失败。"
+    sed -i.bak "s/^DAILY_START_TX=.*/DAILY_START_TX=$current_tx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 DAILY_START_TX 失败。"
+    sed -i.bak "s/^LAST_RESET_DATE=.*/LAST_RESET_DATE=$today/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LAST_RESET_DATE 失败。"
     
     log_message "INFO" "初始化每日计数器: RX=$(format_traffic "$current_rx"), TX=$(format_traffic "$current_tx")"
 }
@@ -168,14 +189,14 @@ init_daily_counter() {
 # 初始化每月流量计数器 (Initialize monthly traffic counter)
 init_monthly_counter() {
     local this_month=$(date +%Y-%m)
-    # Try to read system network interface bytes, default to 0 if failed
+    # 尝试读取系统网卡字节数，如果失败则默认为0 (Try to read system network interface bytes, default to 0 if failed)
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     
-    # Update starting values and date in the config file
-    sed -i "s/^MONTHLY_START_RX=.*/MONTHLY_START_RX=$current_rx/" "$CONFIG_FILE" || log_message "ERROR" "更新 MONTHLY_START_RX 失败。"
-    sed -i "s/^MONTHLY_START_TX=.*/MONTHLY_START_TX=$current_tx/" "$CONFIG_FILE" || log_message "ERROR" "更新 MONTHLY_START_TX 失败。"
-    sed -i "s/^LAST_MONTHLY_RESET_DATE=.*/LAST_MONTHLY_RESET_DATE=$this_month/" "$CONFIG_FILE" || log_message "ERROR" "更新 LAST_MONTHLY_RESET_DATE 失败。"
+    # 更新配置文件中的起始值和日期 (Update starting values and date in the config file)
+    sed -i.bak "s/^MONTHLY_START_RX=.*/MONTHLY_START_RX=$current_rx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 MONTHLY_START_RX 失败。"
+    sed -i.bak "s/^MONTHLY_START_TX=.*/MONTHLY_START_TX=$current_tx/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 MONTHLY_START_TX 失败。"
+    sed -i.bak "s/^LAST_MONTHLY_RESET_DATE=.*/LAST_MONTHLY_RESET_DATE=$this_month/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LAST_MONTHLY_RESET_DATE 失败。"
     
     log_message "INFO" "初始化每月计数器: RX=$(format_traffic "$current_rx"), TX=$(format_traffic "$current_tx")"
 }
@@ -184,7 +205,7 @@ init_monthly_counter() {
 create_config() {
     local today=$(date +%Y-%m-%d)
     local this_month=$(date +%Y-%m)
-    # Use here-document to write config file, ensuring variables are expanded correctly
+    # 使用here-document写入配置文件，确保变量被正确展开 (Use here-document to write config file, ensuring variables are expanded correctly)
     cat > "$CONFIG_FILE" << EOF
 DAILY_LIMIT=$DAILY_LIMIT
 SPEED_LIMIT=$SPEED_LIMIT
@@ -199,7 +220,7 @@ MONTHLY_START_RX=0
 MONTHLY_START_TX=0
 EOF
     
-    # Initialize daily and monthly traffic counters
+    # 初始化今日流量计数和每月流量计数 (Initialize daily and monthly traffic counters)
     init_daily_counter
     init_monthly_counter
     
@@ -209,36 +230,44 @@ EOF
 
 # 读取配置 (Load configuration)
 load_config() {
-    # Ensure file exists and is readable, then source it
+    # 确保文件存在且可读，然后source它 (Ensure file exists and is readable, then source it)
     if [ -f "$CONFIG_FILE" ] && [ -r "$CONFIG_FILE" ]; then
         # shellcheck source=/dev/null
         source "$CONFIG_FILE"
     else
-        echo -e "${RED}错误: 配置文件 $CONFIG_FILE 不存在或无法读取。请先运行安装脚本。${NC}" # Error: Configuration file does not exist or is unreadable. Please run the installation script first.
-        log_message "ERROR" "配置文件 $CONFIG_FILE 不存在或无法读取。"
-        exit 1
+        # 如果在交互模式下未找到配置文件，提示用户安装
+        if [[ "$*" == *"--interactive"* ]]; then
+            echo -e "${RED}错误: 配置文件 $CONFIG_FILE 不存在或无法读取。${NC}" # Error: Configuration file does not exist or is unreadable.
+            echo -e "${YELLOW}请先运行安装脚本来初始化系统。${NC}" # Please run the installation script first to initialize the system.
+            log_message "ERROR" "配置文件 $CONFIG_FILE 不存在或无法读取，交互模式中止。"
+            exit 1
+        else
+            # 对于非交互式调用，直接退出
+            log_message "ERROR" "配置文件 $CONFIG_FILE 不存在或无法读取，脚本中止。"
+            exit 1
+        fi
     fi
 }
 
 # 检查并重置每日计数器 (Check and reset daily counter)
-# This function should be called in the monitor script to ensure daily reset at 00:00
+# 此函数应在监控脚本中调用，确保每日0点重置
 check_and_reset_daily() {
-    load_config # Ensure latest config is loaded
+    load_config # 确保加载最新配置 (Ensure latest config is loaded)
     local today=$(date +%Y-%m-%d)
     
     if [ "$today" != "$LAST_RESET_DATE" ]; then
         echo -e "${YELLOW}检测到新的一天，重置流量计数器...${NC}" # Detected a new day, resetting traffic counter...
         log_message "INFO" "检测到新的一天 ($today)，重置每日流量计数器。"
         
-        # Record yesterday's total traffic (use vnStat data, as system counters might have reset)
+        # 记录昨日总流量 (使用vnStat数据，因为系统计数可能已经重置)
         local yesterday_usage=$(get_vnstat_daily_bytes)
         local yesterday_gb=$(echo "scale=3; $yesterday_usage / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
         log_message "INFO" "昨日($LAST_RESET_DATE)流量统计: ${yesterday_gb}GB"
         
-        # Reset counter
+        # 重置计数器 (Reset counter)
         init_daily_counter
         
-        # If speed limit was active yesterday, automatically remove it for the new day
+        # 如果昨日有限速，新的一天自动解除 (If speed limit was active yesterday, automatically remove it for the new day)
         if [ "$LIMIT_ENABLED" = "true" ]; then
             remove_speed_limit
             log_message "INFO" "新的一天，自动解除限速。"
@@ -247,21 +276,21 @@ check_and_reset_daily() {
 }
 
 # 检查并重置每月计数器 (Check and reset monthly counter)
-# This function should be called in the monitor script to ensure monthly reset on the 1st
+# 此函数应在监控脚本中调用，确保每月1号重置
 check_and_reset_monthly() {
-    load_config # Ensure latest config is loaded
+    load_config # 确保加载最新配置 (Ensure latest config is loaded)
     local this_month=$(date +%Y-%m)
     
     if [ "$this_month" != "$LAST_MONTHLY_RESET_DATE" ]; then
         echo -e "${YELLOW}检测到新的月份，重置每月流量计数器...${NC}" # Detected a new month, resetting monthly traffic counter...
         log_message "INFO" "检测到新的月份 ($this_month)，重置每月流量计数器。"
         
-        # Record last month's total traffic (using vnStat data)
+        # 记录上月总流量 (使用vnStat数据) (Record last month's total traffic (using vnStat data))
         local last_month_usage=$(get_vnstat_monthly_bytes)
         local last_month_gb=$(echo "scale=3; $last_month_usage / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
         log_message "INFO" "上月($LAST_MONTHLY_RESET_DATE)流量统计: ${last_month_gb}GB"
         
-        # Reset counter
+        # 重置计数器 (Reset counter)
         init_monthly_counter
     fi
 }
@@ -270,9 +299,9 @@ check_and_reset_monthly() {
 get_daily_usage_bytes() {
     local skip_reset_check=${1:-false} # Added argument to skip reset check for internal calls
     if [ "$skip_reset_check" = "false" ]; then
-        check_and_reset_daily # Trigger daily reset check here
+        check_and_reset_daily # 在这里触发每日重置检查
     fi
-    load_config # Ensure latest config is loaded
+    load_config # 确保加载最新配置
 
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
@@ -281,7 +310,7 @@ get_daily_usage_bytes() {
     local daily_tx=$((current_tx - DAILY_START_TX))
     local daily_total=$((daily_rx + daily_tx))
     
-    # If negative (possibly due to interface reset), or initial values are anomalous (e.g., 0 but current traffic exists), use vnStat as fallback
+    # 如果出现负数（可能是网卡重置），或者起始值异常（例如0但当前有流量），使用vnStat作为备选
     if [ "$daily_total" -lt 0 ] || ([ "$DAILY_START_RX" -eq 0 ] && [ "$DAILY_START_TX" -eq 0 ] && [ "$current_rx" -gt 0 ] && [ "$current_tx" -gt 0 ] ); then
         log_message "WARN" "今日流量计算出现负数或起始值异常，尝试使用vnStat备选。"
         daily_total=$(get_vnstat_daily_bytes)
@@ -294,9 +323,9 @@ get_daily_usage_bytes() {
 get_monthly_usage_bytes() {
     local skip_reset_check=${1:-false} # Added argument to skip reset check for internal calls
     if [ "$skip_reset_check" = "false" ]; then
-        check_and_reset_monthly # Trigger monthly reset check here
+        check_and_reset_monthly # 在这里触发每月重置检查
     fi
-    load_config # Ensure latest config is loaded
+    load_config # 确保加载最新配置
 
     local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
@@ -305,7 +334,7 @@ get_monthly_usage_bytes() {
     local monthly_tx=$((current_tx - MONTHLY_START_TX))
     local monthly_total=$((monthly_rx + monthly_tx))
 
-    # If negative (possibly due to interface reset), or initial values are anomalous (e.g., 0 but current traffic exists), use vnStat as fallback
+    # 如果出现负数（可能是网卡重置），或者起始值异常（例如0但当前有流量），使用vnStat作为备选
     if [ "$monthly_total" -lt 0 ] || ([ "$MONTHLY_START_RX" -eq 0 ] && [ "$MONTHLY_START_TX" -eq 0 ] && [ "$current_rx" -gt 0 ] && [ "$current_tx" -gt 0 ] ); then
         log_message "WARN" "当月流量计算出现负数或起始值异常，尝试使用vnStat备选。"
         monthly_total=$(get_vnstat_monthly_bytes)
@@ -314,21 +343,21 @@ get_monthly_usage_bytes() {
     echo "$monthly_total"
 }
 
-# vnStat fallback method - Get daily traffic bytes
+# vnStat备选方法 - 获取今日流量字节数 (vnStat fallback method - Get daily traffic bytes)
 get_vnstat_daily_bytes() {
     local today=$(date +%Y-%m-%d)
     local vnstat_bytes=0
     
-    # Prioritize JSON output (vnStat 2.x version support)
+    # 优先使用JSON输出 (vnStat 2.x版本支持) (Prioritize JSON output (vnStat 2.x version support))
     if command -v jq &> /dev/null; then
         local json_output
         json_output=$(vnstat -i "$INTERFACE" --json d 2>/dev/null || true)
         if [ $? -eq 0 ] && [ -n "$json_output" ] && echo "$json_output" | jq -e '.interfaces[0].traffic.day | length > 0' &>/dev/null; then
-            # Find today's data, ensure rx/tx exist, otherwise default to 0
+            # 查找今天的数据，确保rx/tx存在，否则默认为0
             local rx_bytes=$(echo "$json_output" | jq -r ".interfaces[0].traffic.day[] | select(.date.year == $(date +%Y) and .date.month == $(date +%-m) and .date.day == $(date +%-d)) | .rx // 0" 2>/dev/null || echo 0)
             local tx_bytes=$(echo "$json_output" | jq -r ".interfaces[0].traffic.day[] | select(.date.year == $(date +%Y) and .date.month == $(date +%-m) and .date.day == $(date +%-d)) | .tx // 0" 2>/dev/null || echo 0)
             
-            # Ensure jq output is numeric
+            # 确保jq输出是数字 (Ensure jq output is numeric)
             if [[ "$rx_bytes" =~ ^[0-9]+$ ]] && [[ "$tx_bytes" =~ ^[0-9]+$ ]]; then
                 vnstat_bytes=$((rx_bytes + tx_bytes))
             else
@@ -339,7 +368,7 @@ get_vnstat_daily_bytes() {
         fi
     fi
     
-    # If JSON parsing failed or jq is not installed, fallback to parsing text output
+    # 如果JSON解析失败或jq未安装，回退到解析文本输出
     if [ "$vnstat_bytes" -eq 0 ]; then
         local vnstat_line
         vnstat_line=$(vnstat -i "$INTERFACE" -d | grep "$today" | tail -1 || true)
@@ -356,17 +385,17 @@ get_vnstat_daily_bytes() {
     echo "$vnstat_bytes"
 }
 
-# vnStat fallback method - Get monthly traffic bytes
+# vnStat备选方法 - 获取当月流量字节数 (vnStat fallback method - Get monthly traffic bytes)
 get_vnstat_monthly_bytes() {
     local this_month=$(date +%Y-%m)
     local vnstat_bytes=0
     
-    # Prioritize JSON output
+    # 优先使用JSON输出 (Prioritize JSON output)
     if command -v jq &> /dev/null; then
         local json_output
         json_output=$(vnstat -i "$INTERFACE" --json m 2>/dev/null || true)
         if [ $? -eq 0 ] && [ -n "$json_output" ] && echo "$json_output" | jq -e '.interfaces[0].traffic.month | length > 0' &>/dev/null; then
-            # Find current month's data, ensure rx/tx exist, otherwise default to 0
+            # 查找当月的数据，确保rx/tx存在，否则默认为0
             local rx_bytes=$(echo "$json_output" | jq -r ".interfaces[0].traffic.month[] | select(.date.year == $(date +%Y) and .date.month == $(date +%-m)) | .rx // 0" 2>/dev/null || echo 0)
             local tx_bytes=$(echo "$json_output" | jq -r ".interfaces[0].traffic.month[] | select(.date.year == $(date +%Y) and .date.month == $(date +%-m)) | .tx // 0" 2>/dev/null || echo 0)
             
@@ -380,18 +409,19 @@ get_vnstat_monthly_bytes() {
         fi
     fi
     
-    # If JSON parsing failed or jq is not installed, fallback to parsing text output
+    # 如果JSON解析失败或jq未安装，回退到解析文本输出
     if [ "$vnstat_bytes" -eq 0 ]; then
         local vnstat_line
         vnstat_line=$(vnstat -i "$INTERFACE" -m | grep "$this_month" | tail -1 || true)
         if [ -n "$vnstat_line" ]; then
-            # Assume format: 2023-12 | 100.00 GiB | 50.00 GiB | 150.00 GiB | *
+            # 假设格式：2023-12 | 100.00 GiB | 50.00 GiB | 150.00 GiB | *
             local rx_str=$(echo "$vnstat_line" | awk '{print $2}')
             local tx_str=$(echo "$vnstat_line" | awk '{print $3}')
             vnstat_bytes=$(($(convert_to_bytes "$rx_str") + $(convert_to_bytes "$tx_str")))
             log_message "INFO" "使用vnStat文本输出获取当月流量: $vnstat_bytes 字节。"
         else
             log_message "WARN" "无法从vnStat文本输出中获取当月流量。"
+        调
         fi
     fi
     
@@ -414,20 +444,20 @@ convert_to_bytes() {
         return
     fi
     
-    # bc for floating point multiplication, cut -d. -f1 for integer part
+    # bc用于浮点数乘法，cut -d. -f1 用于取整数部分
     case "$unit" in
         "KIB"|"KB"|"K") echo "$number * 1024" | bc | cut -d. -f1 ;;
         "MIB"|"MB"|"M") echo "$number * 1024 * 1024" | bc | cut -d. -f1 ;;
         "GIB"|"GB"|"G") echo "$number * 1024 * 1024 * 1024" | bc | cut -d. -f1 ;;
         "TIB"|"TB"|"T") echo "$number * 1024 * 1024 * 1024 * 1024" | bc | cut -d. -f1 ;;
-        *) echo "$number" | cut -d. -f1 ;; # Default to bytes
+        *) echo "$number" | cut -d. -f1 ;; # 默认为字节 (Default to bytes)
     esac
 }
 
 # 格式化流量显示 (Format traffic display)
 format_traffic() {
     local bytes=$1
-    # Avoid division by zero
+    # 避免除以零 (Avoid division by zero)
     if [ -z "$bytes" ] || [ "$bytes" -eq 0 ]; then
         echo "0B"
         return
@@ -490,53 +520,52 @@ apply_speed_limit() {
     echo -e "${YELLOW}应用限速设置...${NC}" # Applying speed limit settings...
     log_message "INFO" "尝试应用限速。"
     
-    # Check if interface is valid
+    # 检查网卡是否有效
     if ! ip link show "$INTERFACE" &>/dev/null; then
         echo -e "${RED}错误: 网卡 '$INTERFACE' 不存在或无效，无法应用限速。${NC}" # Error: Interface '$INTERFACE' does not exist or is invalid, cannot apply speed limit.
         log_message "ERROR" "网卡 '$INTERFACE' 无效，无法应用限速。"
         return 1
     fi
 
-    # Clear existing rules, ignore errors
-    tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_message "WARN" "删除旧的TC qdisc 失败或不存在。"
+    # 清除现有规则，忽略错误 (Clear existing rules, ignore errors)
+    echo -n "${YELLOW}清除旧限速规则...${NC}" # Clearing old speed limit rules...
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null && echo -e "${GREEN}完成${NC}" || echo -e "${YELLOW}无旧规则或失败${NC}" # Done / No old rules or failed
+    log_message "INFO" "删除旧的TC qdisc。"
     
-    # Set speed limit (convert KB/s to bit/s)
+    # 设置限速 (转换KB/s到bit/s) (Set speed limit (convert KB/s to bit/s))
     local speed_bps=$((SPEED_LIMIT * 8 * 1024))
     
+    echo -n "${YELLOW}应用新限速规则 (${SPEED_LIMIT}KB/s)...${NC}" # Applying new speed limit rules (KB/s)...
     # Add qdisc and class
-    if ! tc qdisc add dev "$INTERFACE" root handle 1: htb default 30; then
-        echo -e "${RED}错误: 无法添加 HTB qdisc。${NC}" # Error: Unable to add HTB qdisc.
-        log_message "ERROR" "无法添加 HTB qdisc。"
+    if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 && \
+       tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
+       tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
+       tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
+        echo -e "${GREEN}完成${NC}" # Complete
+        sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
+        log_message "INFO" "限速已启用: ${SPEED_LIMIT}KB/s"
+        echo -e "${GREEN}限速已启用: ${SPEED_LIMIT}KB/s${NC}" # Speed limit enabled:
+        return 0
+    else
+        echo -e "${RED}失败${NC}" # Failed
+        echo -e "${RED}错误: 无法应用限速规则。请检查权限或TC命令。${NC}" # Error: Unable to apply speed limit rules. Please check permissions or TC command.
+        log_message "ERROR" "无法应用限速规则。"
         return 1
     fi
-    if ! tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit"; then
-        echo -e "${RED}错误: 无法添加 HTB class 1:1。${NC}" # Error: Unable to add HTB class 1:1.
-        log_message "ERROR" "无法添加 HTB class 1:1。"
-        return 1
-    fi
-    if ! tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit"; then
-        echo -e "${RED}错误: 无法添加 HTB class 1:10。${NC}" # Error: Unable to add HTB class 1:10.
-        log_message "ERROR" "无法添加 HTB class 1:10。"
-        return 1
-    fi
-    if ! tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
-        echo -e "${RED}错误: 无法添加 TC filter。${NC}" # Error: Unable to add TC filter.
-        log_message "ERROR" "无法添加 TC filter。"
-        return 1
-    fi
-    
-    sed -i "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/" "$CONFIG_FILE" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
-    log_message "INFO" "限速已启用: ${SPEED_LIMIT}KB/s"
-    echo -e "${GREEN}限速已启用: ${SPEED_LIMIT}KB/s${NC}" # Speed limit enabled:
-    return 0
 }
 
 # 移除限速 (Remove speed limit)
 remove_speed_limit() {
     echo -e "${YELLOW}移除限速设置...${NC}" # Removing speed limit settings...
     log_message "INFO" "尝试移除限速。"
-    tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_message "WARN" "删除旧的TC qdisc 失败或不存在。"
-    sed -i "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/" "$CONFIG_FILE" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
+    echo -n "${YELLOW}清除限速规则...${NC}" # Clearing speed limit rules...
+    if tc qdisc del dev "$INTERFACE" root 2>/dev/null; then
+        echo -e "${GREEN}完成${NC}" # Complete
+    else
+        echo -e "${YELLOW}无规则或失败${NC}" # No rules or failed
+        log_message "WARN" "删除旧的TC qdisc 失败或不存在。"
+    fi
+    sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
     log_message "INFO" "限速已移除。"
     echo -e "${GREEN}限速已移除${NC}" # Speed limit removed.
 }
@@ -552,30 +581,47 @@ speed_test() {
         return
     fi
     
-    # Record traffic before test
-    local before_bytes=$(get_daily_usage_bytes true) # Pass true to avoid triggering reset during test
+    # 记录测试前的流量 (Record traffic before test)
+    local before_bytes=$(get_daily_usage_bytes true) # 传入true避免测试过程中触发重置 (Pass true to avoid triggering reset during test)
     local before_time=$(date '+%Y-%m-%d %H:%M:%S')
     log_message "INFO" "开始速度测试，测试前流量: $(format_traffic "$before_bytes")"
 
     if ! command -v speedtest-cli &> /dev/null; then
-        echo -e "${YELLOW}安装speedtest-cli...${NC}" # Installing speedtest-cli...
-        if ! apt install -y speedtest-cli; then
+        echo -n "${YELLOW}安装speedtest-cli...${NC}" # Installing speedtest-cli...
+        (apt install -y speedtest-cli) &
+        show_progress $!
+        wait $!
+        if [ $? -ne 0 ]; then
             echo -e "${RED}错误: 无法安装 speedtest-cli。请检查网络或apt源。${NC}" # Error: Unable to install speedtest-cli.
             log_message "ERROR" "安装 speedtest-cli 失败。"
             return 1
+        else
+            echo -e "${GREEN}完成${NC}" # Complete
         fi
     fi
     
-    speedtest-cli --simple || { 
-        echo -e "${RED}错误: speedtest-cli 运行失败。${NC}"; 
-        log_message "ERROR" "speedtest-cli 运行失败。"; 
-        return 1; 
-    }
+    echo -n "${YELLOW}运行 speedtest-cli...${NC}" # Running speedtest-cli...
+    # 使用匿名管道将speedtest-cli的输出重定向到后台子进程
+    # 这样可以显示进度动画，同时捕获speedtest-cli的输出
+    local speedtest_output=""
+    speedtest_output=$( (speedtest-cli --simple 2>&1) & show_progress $! && wait $! )
+    local speedtest_exit_code=$?
+
+    if [ "$speedtest_exit_code" -ne 0 ]; then
+        echo -e "${RED}失败${NC}" # Failed
+        echo -e "${RED}错误: speedtest-cli 运行失败。${NC}" # Error: speedtest-cli failed to run.
+        echo -e "${YELLOW}诊断信息:${NC}\n$speedtest_output" # Diagnostic info:
+        log_message "ERROR" "speedtest-cli 运行失败。输出: $speedtest_output"
+        return 1
+    else
+        echo -e "${GREEN}完成${NC}" # Complete
+        echo "$speedtest_output" # Display actual speedtest results
+    fi
     
     echo -e "${YELLOW}测试完成，正在计算流量消耗...${NC}" # Test complete, calculating traffic consumption...
-    sleep 2 # Give system some time to update statistics
+    sleep 2 # 给予系统一些时间更新统计数据 (Give system some time to update statistics)
     
-    # Force refresh and calculate consumption
+    # 强制刷新并计算消耗 (Force refresh and calculate consumption)
     force_refresh
     local after_bytes=$(get_daily_usage_bytes true)
     local test_usage=$((after_bytes - before_bytes))
@@ -584,46 +630,46 @@ speed_test() {
         echo -e "${GREEN}本次测试消耗流量: $(format_traffic "$test_usage")${NC}" # Traffic consumed by this test:
         log_message "INFO" "速度测试消耗: $(format_traffic "$test_usage")"
     else
-        echo -e "${YELLOW}流量消耗计算可能不准确，请查看总使用量或稍后重试${NC}" # Traffic consumption calculation might be inaccurate, please check total usage or try again later.
+        echo -e "${YELLOW}流量消耗计算可能不准确（可能为0）。请查看总使用量或稍后重试。${NC}" # Traffic consumption calculation might be inaccurate (possibly 0). Please check total usage or try again later.
         log_message "WARN" "速度测试后流量消耗计算结果不准确 ($test_usage 字节)。"
     fi
 }
 
 # 显示详细流量统计 (Show detailed traffic statistics)
 show_detailed_stats() {
-    load_config
+    load_config "--interactive" # 确保在交互模式下加载配置 (Ensure config is loaded in interactive mode)
     local today=$(date +%Y-%m-%d)
     local this_month=$(date +%Y-%m)
     
-    clear # Clear screen for better display
+    clear # 清屏以获得更好的显示效果 (Clear screen for better display)
 
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║                    详细流量统计                              ║${NC}" # Detailed Traffic Statistics
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    # Get precise daily/monthly traffic usage (with fallback logic)
+    # 获取精确的今日/本月流量使用量（含回退逻辑）
     local precise_daily_total=$(get_daily_usage_bytes)
     local precise_monthly_total=$(get_monthly_usage_bytes)
 
     echo -e "${WHITE}系统网卡统计 ($INTERFACE):${NC}" # System Network Interface Statistics
-    local current_rx_raw=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
-    local current_tx_raw=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
+    local current_rx_raw=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo "0")
+    local current_tx_raw=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo "0")
     echo -e "  总接收: $(format_traffic "$current_rx_raw")" # Total received:
     echo -e "  总发送: $(format_traffic "$current_tx_raw")" # Total sent:
     echo ""
 
     echo -e "${WHITE}今日统计 (${LAST_RESET_DATE}):${NC}" # Today's Statistics:
     echo -e "  今日总计: ${GREEN}$(format_traffic "$precise_daily_total")${NC}" # Today's total:
-    echo -e "  (通过系统网卡计数与vnStat备选精确计算)" # (Precisely calculated via system interface counters and vnStat fallback)
+    echo -e "  (通过系统网卡计数与vnStat备选精确计算)${NC}" # (Precisely calculated via system interface counters and vnStat fallback)
     echo ""
 
     echo -e "${WHITE}本月统计 (${LAST_MONTHLY_RESET_DATE}):${NC}" # This Month's Statistics:
     echo -e "  本月总计: ${GREEN}$(format_traffic "$precise_monthly_total")${NC}" # This month's total:
-    echo -e "  (通过系统网卡计数与vnStat备选精确计算)" # (Precisely calculated via system interface counters and vnStat fallback)
+    echo -e "  (通过系统网卡计数与vnStat备选精确计算)${NC}" # (Precisely calculated via system interface counters and vnStat fallback)
     echo ""
     
-    # vnStat Raw Statistics (for reference)
+    # vnStat统计（原始数据，供参考）(vnStat Raw Statistics (for reference))
     local vnstat_daily_bytes=$(get_vnstat_daily_bytes)
     local vnstat_monthly_bytes=$(get_vnstat_monthly_bytes)
     echo -e "${WHITE}vnStat 原始统计 (仅供参考):${NC}" # vnStat Raw Statistics (for reference only):
@@ -631,7 +677,7 @@ show_detailed_stats() {
     echo -e "  本月 vnStat 显示: $(format_traffic "$vnstat_monthly_bytes")" # This month's vnStat display:
     echo ""
     
-    # Display recent logs
+    # 显示最近的日志 (Display recent logs)
     echo -e "${WHITE}最近活动日志:${NC}" # Recent Activity Log:
     if [ -f "$TRAFFIC_LOG" ]; then
         if [ "$(wc -l < "$TRAFFIC_LOG")" -gt 0 ]; then
@@ -646,7 +692,7 @@ show_detailed_stats() {
     fi
     echo ""
     
-    # Configuration Information
+    # 配置信息 (Configuration Information)
     echo -e "${WHITE}当前配置:${NC}" # Current Configuration:
     echo -e "  每日限制: ${DAILY_LIMIT}GB" # Daily Limit:
     echo -e "  每月限制: ${MONTHLY_LIMIT}GB" # Monthly Limit:
@@ -659,8 +705,65 @@ show_detailed_stats() {
     echo -e "  本月起始RX: $(format_traffic "$MONTHLY_START_RX")" # Monthly Start RX:
     echo -e "  本月起始TX: $(format_traffic "$MONTHLY_START_TX")" # Monthly Start TX:
     echo ""
-    echo -e "${YELLOW}提示: 要修改限制值，请编辑配置文件: $CONFIG_FILE${NC}" # Hint: To modify limit values, please edit the configuration file:
+    echo -e "${YELLOW}提示: 您可以使用菜单中的'修改配置'选项来更改限制值。${NC}" # Hint: You can use the 'Modify Configuration' option in the menu to change limit values.
     echo ""
+}
+
+# 修改配置 (Modify Configuration)
+modify_config() {
+    load_config "--interactive" # 确保加载最新配置
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                        修改配置                              ║${NC}" # Modify Configuration
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${WHITE}当前每日流量限制: ${DAILY_LIMIT}GB${NC}" # Current daily traffic limit:
+    read -rp "请输入新的每日流量限制 (GB, 0为无限制，回车跳过): " new_daily_limit # Enter new daily traffic limit (GB, 0 for unlimited, press Enter to skip):
+    if [[ -n "$new_daily_limit" ]]; then
+        if [[ "$new_daily_limit" =~ ^[0-9]+$ ]] && [ "$new_daily_limit" -ge 0 ]; then
+            DAILY_LIMIT="$new_daily_limit"
+            sed -i.bak "s/^DAILY_LIMIT=.*/DAILY_LIMIT=$DAILY_LIMIT/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 DAILY_LIMIT 失败。"
+            log_message "INFO" "每日流量限制已更新为: ${DAILY_LIMIT}GB"
+            echo -e "${GREEN}每日流量限制已更新为: ${DAILY_LIMIT}GB${NC}"
+        else
+            echo -e "${RED}输入无效，每日流量限制未更改。${NC}" # Invalid input, daily traffic limit not changed.
+        fi
+    fi
+
+    echo ""
+    echo -e "${WHITE}当前每月流量限制: ${MONTHLY_LIMIT}GB${NC}" # Current monthly traffic limit:
+    read -rp "请输入新的每月流量限制 (GB, 0为无限制，回车跳过): " new_monthly_limit # Enter new monthly traffic limit (GB, 0 for unlimited, press Enter to skip):
+    if [[ -n "$new_monthly_limit" ]]; then
+        if [[ "$new_monthly_limit" =~ ^[0-9]+$ ]] && [ "$new_monthly_limit" -ge 0 ]; then
+            MONTHLY_LIMIT="$new_monthly_limit"
+            sed -i.bak "s/^MONTHLY_LIMIT=.*/MONTHLY_LIMIT=$MONTHLY_LIMIT/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 MONTHLY_LIMIT 失败。"
+            log_message "INFO" "每月流量限制已更新为: ${MONTHLY_LIMIT}GB"
+            echo -e "${GREEN}每月流量限制已更新为: ${MONTHLY_LIMIT}GB${NC}"
+        else
+            echo -e "${RED}输入无效，每月流量限制未更改。${NC}" # Invalid input, monthly traffic limit not changed.
+        fi
+    fi
+
+    echo ""
+    echo -e "${WHITE}当前限速速度: ${SPEED_LIMIT}KB/s${NC}" # Current speed limit:
+    read -rp "请输入新的限速速度 (KB/s, 0为无限制，回车跳过): " new_speed_limit # Enter new speed limit (KB/s, 0 for unlimited, press Enter to skip):
+    if [[ -n "$new_speed_limit" ]]; then
+        if [[ "$new_speed_limit" =~ ^[0-9]+$ ]] && [ "$new_speed_limit" -ge 0 ]; then
+            SPEED_LIMIT="$new_speed_limit"
+            sed -i.bak "s/^SPEED_LIMIT=.*/SPEED_LIMIT=$SPEED_LIMIT/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 SPEED_LIMIT 失败。"
+            log_message "INFO" "限速速度已更新为: ${SPEED_LIMIT}KB/s"
+            echo -e "${GREEN}限速速度已更新为: ${SPEED_LIMIT}KB/s${NC}"
+            # 如果当前已启用限速，则重新应用以使新速度生效
+            if [ "$LIMIT_ENABLED" = "true" ]; then
+                echo -e "${YELLOW}限速速度已更改，正在重新应用限速规则...${NC}" # Speed limit changed, reapplying speed limit rules...
+                apply_speed_limit # 重新应用限速
+            fi
+        else
+            echo -e "${RED}输入无效，限速速度未更改。${NC}" # Invalid input, speed limit not changed.
+        fi
+    fi
+    echo ""
+    echo -e "${GREEN}配置修改完成。${NC}" # Configuration modification complete.
+    log_message "INFO" "配置修改操作完成。"
 }
 
 # 创建监控服务 (Create monitor service)
@@ -683,20 +786,21 @@ EOF
     # Monitor Script (executed by systemd)
     cat > "$MONITOR_SCRIPT" << 'EOF'
 #!/bin/bash
-# Note: This script runs in a systemd service, its independence must be ensured
+# 注意：此脚本在systemd服务中运行，需保证其独立性
+# (Note: This script runs in a systemd service, its independence must be ensured)
 set -euo pipefail
 
 CONFIG_FILE="/etc/ce_traffic_limit.conf"
 TRAFFIC_LOG="/var/log/ce-daily-traffic.log"
 
-# Log function for monitor script
+# 记录日志 (Log function for monitor script)
 log_monitor_message() {
     local type="$1"
     local message="$2"
     echo "$(date '+%Y-%m-%d %H:%M:%S') - ce-monitor ${type}: $message" >> "$TRAFFIC_LOG"
 }
 
-# Load configuration
+# 加载配置 (Load configuration)
 load_monitor_config() {
     if [ -f "$CONFIG_FILE" ] && [ -r "$CONFIG_FILE" ]; then
         # shellcheck source=/dev/null
@@ -707,14 +811,14 @@ load_monitor_config() {
     fi
 }
 
-# Traffic statistics function (copied from main script's key logic)
+# 流量统计函数 (复制主脚本的关键逻辑)
 get_current_usage_bytes_raw_monitor() {
     local current_rx_b=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
     local current_tx_b=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     echo "$current_rx_b $current_tx_b"
 }
 
-# Convert traffic units to bytes (copied from main script's key logic)
+# 转换流量单位为字节 (复制主脚本的关键逻辑)
 convert_to_bytes_monitor() {
     local input="$1"
     if [ -z "$input" ] || [ "$input" = "--" ]; then echo 0; return; fi
@@ -730,7 +834,7 @@ convert_to_bytes_monitor() {
     esac
 }
 
-# vnStat fallback method - Daily (copied from main script's key logic)
+# vnStat备选方法 - 日 (复制主脚本的关键逻辑)
 get_vnstat_daily_bytes_monitor() {
     local today_m=$(date +%Y-%m-%d)
     local vnstat_bytes_m=0
@@ -753,7 +857,7 @@ get_vnstat_daily_bytes_monitor() {
     echo "$vnstat_bytes_m"
 }
 
-# vnStat fallback method - Monthly (copied from main script's key logic)
+# vnStat备选方法 - 月 (复制主脚本的关键逻辑)
 get_vnstat_monthly_bytes_monitor() {
     local this_month_m=$(date +%Y-%m)
     local vnstat_bytes_m=0
@@ -776,10 +880,10 @@ get_vnstat_monthly_bytes_monitor() {
     echo "$vnstat_bytes_m"
 }
 
-# Main monitoring logic
+# 主监控逻辑
 load_monitor_config
 
-# --- Daily Reset Logic ---
+# --- 每日重置逻辑 (Daily Reset Logic) ---
 current_day=$(date +%Y-%m-%d)
 if [ "$current_day" != "$LAST_RESET_DATE" ]; then
     log_monitor_message "INFO" "检测到新的一天 ($current_day)，重置每日计数器和限速状态。"
@@ -788,20 +892,20 @@ if [ "$current_day" != "$LAST_RESET_DATE" ]; then
     current_tx_for_reset=${current_stats[1]}
 
     # Update starting values and date in the config file
-    sed -i "s/^DAILY_START_RX=.*/DAILY_START_RX=$current_rx_for_reset/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 DAILY_START_RX 失败。"
-    sed -i "s/^DAILY_START_TX=.*/DAILY_START_TX=$current_tx_for_reset/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 DAILY_START_TX 失败。"
-    sed -i "s/^LAST_RESET_DATE=.*/LAST_RESET_DATE=$current_day/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 LAST_RESET_DATE 失败。"
+    sed -i.bak "s/^DAILY_START_RX=.*/DAILY_START_RX=$current_rx_for_reset/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 DAILY_START_RX 失败。"
+    sed -i.bak "s/^DAILY_START_TX=.*/DAILY_START_TX=$current_tx_for_reset/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 DAILY_START_TX 失败。"
+    sed -i.bak "s/^LAST_RESET_DATE=.*/LAST_RESET_DATE=$current_day/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LAST_RESET_DATE 失败。"
     
     if [ "$LIMIT_ENABLED" = "true" ]; then
         tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC qdisc 失败或不存在。"
-        sed -i 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
+        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
         log_monitor_message "INFO" "新的一天，自动解除限速。"
     fi
     # Reload configuration, ensure subsequent operations use latest values
     load_monitor_config
 fi
 
-# --- Monthly Reset Logic ---
+# --- 每月重置逻辑 (Monthly Reset Logic) ---
 current_month=$(date +%Y-%m)
 if [ "$current_month" != "$LAST_MONTHLY_RESET_DATE" ]; then
     log_monitor_message "INFO" "检测到新的月份 ($current_month)，重置每月计数器。"
@@ -809,20 +913,20 @@ if [ "$current_month" != "$LAST_MONTHLY_RESET_DATE" ]; then
     current_rx_for_reset=${current_stats[0]}
     current_tx_for_reset=${current_stats[1]}
 
-    sed -i "s/^MONTHLY_START_RX=.*/MONTHLY_START_RX=$current_rx_for_reset/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 MONTHLY_START_RX 失败。"
-    sed -i "s/^MONTHLY_START_TX=.*/MONTHLY_START_TX=$current_tx_for_reset/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 MONTHLY_START_TX 失败。"
-    sed -i "s/^LAST_MONTHLY_RESET_DATE=.*/LAST_MONTHLY_RESET_DATE=$current_month/" "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 LAST_MONTHLY_RESET_DATE 失败。"
+    sed -i.bak "s/^MONTHLY_START_RX=.*/MONTHLY_START_RX=$current_rx_for_reset/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 MONTHLY_START_RX 失败。"
+    sed -i.bak "s/^MONTHLY_START_TX=.*/MONTHLY_START_TX=$current_tx_for_reset/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 MONTHLY_START_TX 失败。"
+    sed -i.bak "s/^LAST_MONTHLY_RESET_DATE=.*/LAST_MONTHLY_RESET_DATE=$current_month/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LAST_MONTHLY_RESET_DATE 失败。"
     # Reload configuration, ensure subsequent operations use latest values
     load_monitor_config
 fi
 
 
-# Get daily traffic usage
+# 获取当日流量使用量 (Get daily traffic usage)
 daily_current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
 daily_current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
 daily_total_bytes=$(( (daily_current_rx - DAILY_START_RX) + (daily_current_tx - DAILY_START_TX) ))
 
-# If system stats are negative, or initial values are anomalous, use vnStat as fallback
+# 如果系统统计出现负数，或者起始值异常，使用vnStat作为备选
 if [ "$daily_total_bytes" -lt 0 ] || ([ "$DAILY_START_RX" -eq 0 ] && [ "$DAILY_START_TX" -eq 0 ] && [ "$daily_current_rx" -gt 0 ] && [ "$daily_current_tx" -gt 0 ] ); then
     log_monitor_message "WARN" "每日流量计算负数或起始值异常，使用vnStat备选。"
     daily_total_bytes=$(get_vnstat_daily_bytes_monitor)
@@ -833,18 +937,19 @@ used_gb=$(echo "scale=3; $daily_total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/nu
 limit_reached=$(echo "$used_gb >= $DAILY_LIMIT" | bc 2>/dev/null || echo "0")
 
 if [ "$limit_reached" -eq 1 ] && [ "$LIMIT_ENABLED" != "true" ]; then
-    # Automatically enable speed limit
+    # 自动启用限速 (Automatically enable speed limit)
     local speed_bps=$((SPEED_LIMIT * 8 * 1024))
     tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC qdisc 失败或不存在 (自动限速前)。"
     
-    if ! tc qdisc add dev "$INTERFACE" root handle 1: htb default 30; then log_monitor_message "ERROR" "monitor: 无法添加 HTB qdisc (自动限速)。"; exit 1; fi
-    if ! tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit"; then log_monitor_message "ERROR" "monitor: 无法添加 HTB class 1:1 (自动限速)。"; exit 1; fi
-    if ! tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit"; then log_monitor_message "ERROR" "monitor: 无法添加 HTB class 1:10 (自动限速)。"; exit 1; }
-    if ! tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then log_monitor_message "ERROR" "monitor: 无法添加 TC filter (自动限速)。"; exit 1; fi
-    
-    sed -i 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/' "$CONFIG_FILE" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败 (自动限速)。"
-    
-    log_monitor_message "INFO" "自动限速触发: 使用量=${used_gb}GB, 速度=${SPEED_LIMIT}KB/s"
+    if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 && \
+       tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
+       tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
+       tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
+        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败 (自动限速)。"
+        log_monitor_message "INFO" "自动限速触发: 使用量=${used_gb}GB, 速度=${SPEED_LIMIT}KB/s"
+    else
+        log_monitor_message "ERROR" "monitor: 自动限速规则应用失败。"
+    fi
 fi
 EOF
 
@@ -863,7 +968,7 @@ Description=CE Traffic Monitor Timer
 Requires=ce-traffic-monitor.service
 
 [Timer]
-# Run the service every 3 minutes
+# 每3分钟运行一次服务 (Run the service every 3 minutes)
 OnCalendar=*:0/3
 Persistent=true
 
@@ -880,22 +985,22 @@ EOF
 
 # 显示实时状态 (Show real-time status)
 show_status() {
-    clear # Clear screen for better display
-    load_config
+    clear # 清屏以获得更好的显示效果 (Clear screen for better display)
+    load_config "--interactive" # 确保在交互模式下加载配置 (Ensure config is loaded in interactive mode)
     
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║                    CE 流量限速管理系统                       ║${NC}" # CE Traffic Limiting Management System
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    # System Information
+    # 系统信息 (System Information)
     echo -e "${WHITE}系统版本:${NC} $(lsb_release -d | cut -f2 || echo "未知")" # System version:
     echo -e "${WHITE}网络接口:${NC} $INTERFACE" # Network interface:
     echo -e "${WHITE}vnStat版本:${NC} $(vnstat --version 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")" # vnStat version: (Unknown)
     echo -e "${WHITE}更新时间:${NC} $(date '+%Y-%m-%d %H:%M:%S')" # Update time:
     echo ""
     
-    # Traffic usage - Daily
+    # 流量使用情况 - 日 (Traffic usage - Daily)
     local used_daily_bytes=$(get_daily_usage_bytes)
     local used_daily_gb=$(echo "scale=3; $used_daily_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
     local remaining_daily_gb=$(echo "scale=3; $DAILY_LIMIT - $used_daily_gb" | bc 2>/dev/null || echo "$DAILY_LIMIT")
@@ -906,7 +1011,7 @@ show_status() {
     echo -e "  剩余: ${CYAN}${remaining_daily_gb}GB${NC}" # Remaining:
     echo -e "  总计: $(format_traffic "$used_daily_bytes")" # Total:
     
-    # Daily progress bar
+    # 每日进度条 (Daily progress bar)
     local bar_length=50
     local filled_length=$(printf "%.0f" "$(echo "$percentage_daily * $bar_length / 100" | bc 2>/dev/null)")
     [ -z "$filled_length" ] && filled_length=0
@@ -931,7 +1036,7 @@ show_status() {
     echo -e "  [${bar_daily_color}$bar_daily${NC}]"
     echo ""
 
-    # Traffic usage - Monthly
+    # 流量使用情况 - 月 (Traffic usage - Monthly)
     local used_monthly_bytes=$(get_monthly_usage_bytes)
     local used_monthly_gb=$(echo "scale=3; $used_monthly_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
     local remaining_monthly_gb=$(echo "scale=3; $MONTHLY_LIMIT - $used_monthly_gb" | bc 2>/dev/null || echo "$MONTHLY_LIMIT")
@@ -942,7 +1047,7 @@ show_status() {
     echo -e "  剩余: ${CYAN}${remaining_monthly_gb}GB${NC}" # Remaining:
     echo -e "  总计: $(format_traffic "$used_monthly_bytes")" # Total:
 
-    # Monthly progress bar
+    # 每月进度条 (Monthly progress bar)
     local monthly_filled_length=$(printf "%.0f" "$(echo "$percentage_monthly * $bar_length / 100" | bc 2>/dev/null)")
     [ -z "$monthly_filled_length" ] && monthly_filled_length=0
     
@@ -966,7 +1071,7 @@ show_status() {
     echo -e "  [${bar_monthly_color}$bar_monthly${NC}]"
     echo ""
     
-    # Speed limit status
+    # 限速状态 (Speed limit status)
     if [ "$LIMIT_ENABLED" = "true" ]; then
         echo -e "${RED}⚠️  限速状态: 已启用 (${SPEED_LIMIT}KB/s)${NC}" # Speed limit status: Enabled
     else
@@ -985,10 +1090,10 @@ show_menu() {
     echo -e "${CYAN}║  ${WHITE}3.${NC} 网络速度测试 (Network speed test)                            ${CYAN}║${NC}"
     echo -e "${CYAN}║  ${WHITE}4.${NC} 强制刷新统计 (Force refresh statistics)                      ${CYAN}║${NC}"
     echo -e "${CYAN}║  ${WHITE}5.${NC} 详细流量统计 (Detailed traffic statistics)                   ${CYAN}║${NC}"
-    echo -e "${CYAN}║  ${WHITE}6.${NC} 重置今日计数 (Reset daily counter)                           ${CYAN}║${NC}"
-    echo -e "${CYAN}║  ${WHITE}7.${NC} 重置每月计数 (Reset monthly counter)                         ${CYAN}║${NC}"
-    echo -e "${CYAN}║  ${WHITE}8.${NC} 卸载所有组件 (Uninstall all components)                      ${CYAN}║${NC}"
-    echo -e "${CYAN}║  ${WHITE}9.${NC} 刷新显示 (Refresh display)                                   ${CYAN}║${NC}"
+    echo -e "${CYAN}║  ${WHITE}6.${NC} 修改配置 (Modify Configuration)                              ${CYAN}║${NC}" # New option
+    echo -e "${CYAN}║  ${WHITE}7.${NC} 重置今日计数 (Reset daily counter)                           ${CYAN}║${NC}"
+    echo -e "${CYAN}║  ${WHITE}8.${NC} 重置每月计数 (Reset monthly counter)                         ${CYAN}║${NC}"
+    echo -e "${CYAN}║  ${WHITE}9.${NC} 卸载所有组件 (Uninstall all components)                      ${CYAN}║${NC}"
     echo -e "${CYAN}║  ${WHITE}0.${NC} 退出程序 (Exit program)                                      ${CYAN}║${NC}"
     echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -1001,14 +1106,14 @@ reset_daily_counter() {
     if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}重置今日流量计数器...${NC}" # Resetting daily traffic counter...
         
-        # Record usage before reset
-        local before_usage=$(get_daily_usage_bytes true) # Pass true to avoid recursive calls
+        # 记录重置前的使用量 (Record usage before reset)
+        local before_usage=$(get_daily_usage_bytes true) # 传入true避免递归调用 (Pass true to avoid recursive calls)
         log_message "INFO" "手动重置每日计数器，重置前使用量: $(format_traffic "$before_usage")"
         
         # Reset counter
         init_daily_counter
         
-        # If speed limit is currently active, ask to remove it
+        # 如果当前有限速，询问是否解除 (If speed limit is currently active, ask to remove it)
         if [ "$LIMIT_ENABLED" = "true" ]; then
             echo -e "${YELLOW}检测到当前有限速，是否同时解除限速? (y/N): ${NC}" # Detected current speed limit, remove it as well? (y/N):
             read -rp "请输入 (y/N): " remove_limit # Please enter (y/N):
@@ -1032,8 +1137,8 @@ reset_monthly_counter() {
     if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}重置每月流量计数器...${NC}" # Resetting monthly traffic counter...
         
-        # Record usage before reset
-        local before_usage=$(get_monthly_usage_bytes true) # Pass true to avoid recursive calls
+        # 记录重置前的使用量 (Record usage before reset)
+        local before_usage=$(get_monthly_usage_bytes true) # 传入true避免递归调用 (Pass true to avoid recursive calls)
         log_message "INFO" "手动重置每月计数器，重置前使用量: $(format_traffic "$before_usage")"
         
         # Reset counter
@@ -1055,13 +1160,13 @@ uninstall_all() {
        echo -e "${YELLOW}卸载中...${NC}" # Uninstalling...
        log_message "INFO" "开始卸载所有组件。"
        
-       # Stop and disable service and timer
+       # 停止并禁用服务和定时器 (Stop and disable service and timer)
        systemctl stop ce-traffic-monitor.timer 2>/dev/null || log_message "WARN" "停止定时器失败。"
        systemctl disable ce-traffic-monitor.timer 2>/dev/null || log_message "WARN" "禁用定时器失败。"
        systemctl stop ce-traffic-monitor.service 2>/dev/null || log_message "WARN" "停止服务失败。"
        systemctl disable ce-traffic-monitor.service 2>/dev/null || log_message "WARN" "禁用服务失败。"
        
-       # Remove speed limit (INTERFACE variable might be lost, but tc command usually doesn't depend on config file)
+       # 移除限速 (可能INTERFACE变量已丢失，但tc命令通常不依赖于配置文件)
        local current_interface=""
        if [ -f "$CONFIG_FILE" ]; then
            # shellcheck source=/dev/null
@@ -1069,16 +1174,16 @@ uninstall_all() {
            current_interface="$INTERFACE"
        fi
        
-       # Attempt to remove existing qdisc, cover common interface names
+       # 尝试移除可能存在的qdisc，覆盖常见的接口名称
        local interfaces_to_check=("${current_interface}" "eth0" "enp0s3" "ens33" "wlan0")
        for iface in "${interfaces_to_check[@]}"; do
-           if [ -n "$iface" ]; then # Ensure interface name is not empty
+           if [ -n "$iface" ]; then # 确保接口名不为空
                tc qdisc del dev "$iface" root 2>/dev/null || true
                log_message "INFO" "尝试移除接口 $iface 上的限速规则。"
            fi
        done
        
-       # Delete files
+       # 删除文件 (Delete files)
        rm -f "$CONFIG_FILE" || log_message "WARN" "删除配置文件失败。"
        rm -f "$SERVICE_FILE" || log_message "WARN" "删除服务文件失败。"
        rm -f "$TIMER_FILE" || log_message "WARN" "删除定时器文件失败。"
@@ -1090,7 +1195,7 @@ uninstall_all() {
        
        systemctl daemon-reload || log_message "ERROR" "daemon-reload 失败。"
        
-       # Attempt to uninstall dependencies, but avoid removing commonly used packages
+       # 尝试卸载依赖，但避免误删常用包 (Attempt to uninstall dependencies, but avoid removing commonly used packages)
        echo -e "${YELLOW}尝试清理依赖 (vnstat, speedtest-cli)...${NC}" # Attempting to clean up dependencies (vnstat, speedtest-cli)...
        apt remove -y vnstat speedtest-cli 2>/dev/null || log_message "WARN" "卸载依赖失败或依赖不存在。"
        apt autoremove -y 2>/dev/null || log_message "WARN" "自动清理不再需要的包失败。"
@@ -1133,19 +1238,20 @@ interactive_mode() {
                 show_detailed_stats
                 read -rp "按回车键继续..." # Press Enter to continue...
                 ;;
-            6)
-                reset_daily_counter
+            6) # New option for modifying config
+                modify_config
                 read -rp "按回车键继续..." # Press Enter to continue...
                 ;;
             7)
-                reset_monthly_counter
+                reset_daily_counter
                 read -rp "按回车键继续..." # Press Enter to continue...
                 ;;
             8)
-                uninstall_all
+                reset_monthly_counter
+                read -rp "按回车键继续..." # Press Enter to continue...
                 ;;
             9)
-                continue # Skip read -p, directly go to next loop to refresh display
+                uninstall_all
                 ;;
             0)
                 echo -e "${GREEN}感谢使用 CE 流量限速管理系统${NC}" # Thank you for using CE Traffic Limiting Management System.
@@ -1164,9 +1270,10 @@ create_ce_command() {
     # This is a wrapper script to launch the main script in interactive mode
     cat > "$SCRIPT_PATH" << 'EOF'
 #!/bin/bash
-# This is a shortcut script, calls the main installation/management script
+# 这个是快捷启动脚本，调用主安装/管理脚本
+# (This is a shortcut script, calls the main installation/management script)
 
-# Define colors for this wrapper script
+# 定义颜色 (Define colors for this wrapper script)
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
@@ -1209,17 +1316,17 @@ main_install() {
     get_system_info
     detect_interface
     install_dependencies
-    create_config # Create config and initialize daily/monthly counters
+    create_config # 创建配置并初始化今日/每月计数器
     create_monitor_service
     create_timer
     
-    # Copy script to system directory for future 'ce' command calls and updates
+    # 复制脚本到系统目录，以便后续ce命令调用和更新
     cp "$0" "$INSTALLER_PATH" || log_message "ERROR" "复制安装脚本到 $INSTALLER_PATH 失败。"
     chmod +x "$INSTALLER_PATH" || log_message "ERROR" "设置安装脚本可执行权限失败。"
     
     create_ce_command
     
-    # Create log file and set permissions
+    # 创建日志文件并设置权限 (Create log file and set permissions)
     touch "$TRAFFIC_LOG" || log_message "ERROR" "创建流量日志文件失败。"
     chmod 644 "$TRAFFIC_LOG" || log_message "ERROR" "设置流量日志文件权限失败。"
     
@@ -1243,7 +1350,7 @@ main_install() {
 # 主程序入口 (Main Program Entry Point)
 # ==============================================================================
 
-# Decide whether to install or enter interactive mode based on arguments or config file existence
+# 根据参数或配置文件存在与否决定是安装还是进入交互模式
 case "${1:-}" in # "${1:-}" prevents error if no argument is provided
     --interactive)
         interactive_mode
@@ -1251,7 +1358,7 @@ case "${1:-}" in # "${1:-}" prevents error if no argument is provided
     --install)
         main_install
         ;;
-    --uninstall) # Added direct uninstall option
+    --uninstall) # 新增直接卸载选项 (Added direct uninstall option)
         uninstall_all
         ;;
     *)
