@@ -23,7 +23,7 @@ BLUE='\033[0;34m'
 PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 WHITE='\033[1;37m'
-NC='\033[0m' # 无颜色
+NC='\033[0m' # No Color
 
 # 配置文件路径
 CONFIG_FILE="/etc/ce_traffic_limit.conf"
@@ -507,10 +507,10 @@ check_monthly_limit() {
     echo "$limit_reached"
 }
 
-# 应用限速
+# 应用限速 (同时限制上传和下载)
 apply_speed_limit() {
-    echo -e "${YELLOW}应用限速设置...${NC}" # Applying speed limit settings...
-    log_message "INFO" "尝试应用限速。"
+    echo -e "${YELLOW}应用限速设置 (上传和下载)...${NC}" # Applying speed limit settings (upload and download)...
+    log_message "INFO" "尝试应用上传和下载限速。"
     
     # 检查网络接口是否有效
     if ! ip link show "$INTERFACE" &>/dev/null; then
@@ -521,49 +521,95 @@ apply_speed_limit() {
 
     # 清除现有规则，忽略错误
     echo -n "${YELLOW}清除旧限速规则...${NC}" # Clearing old speed limit rules...
-    tc qdisc del dev "$INTERFACE" root 2>/dev/null && echo -e "${GREEN}完成${NC}" || echo -e "${YELLOW}无旧规则或失败${NC}" # Done / No old rules or failed
-    log_message "INFO" "删除旧的TC qdisc。"
+    # 清除 egress (上传) 规则
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null && echo -e "${GREEN}完成 egress${NC}" || echo -e "${YELLOW}无旧 egress 规则或失败${NC}"
+    # 清除 ingress (下载) 规则
+    tc qdisc del dev "$INTERFACE" ingress 2>/dev/null && echo -e "${GREEN}完成 ingress${NC}" || echo -e "${YELLOW}无旧 ingress 规则或失败${NC}"
+    log_message "INFO" "删除旧的TC qdisc (egress 和 ingress)。"
     
     # 设置限速 (将 KB/s 转换为 bit/s)
     local speed_bps=$((SPEED_LIMIT * 8 * 1024))
     
-    echo -n "${YELLOW}应用新限速规则 (${SPEED_LIMIT}KB/s)...${NC}" # Applying new speed limit rules (KB/s)...
-    # 添加 qdisc 和 class
-    # 注意：此处的 tc 规则主要限制服务器的“上传” ( egress / outgoing ) 流量。
-    # 如果需要限制下载（ingress / incoming），则需要添加额外的 tc ingress qdisc 规则。
+    echo -n "${YELLOW}应用新限速规则 (${SPEED_LIMIT}KB/s，上传和下载)...${NC}" # Applying new speed limit rules (KB/s, upload and download)...
+    
+    # 应用上传 (egress) 限速
     if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 && \
        tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
        tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
        tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
-        echo -e "${GREEN}完成${NC}" # Complete
-        sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
-        LIMIT_ENABLED="true" # 更新缓存值
-        log_message "INFO" "限速已启用: ${SPEED_LIMIT}KB/s"
-        echo -e "${GREEN}限速已启用: ${SPEED_LIMIT}KB/s${NC}" # Speed limit enabled:
-        return 0
+        log_message "INFO" "上传限速已应用: ${SPEED_LIMIT}KB/s"
     else
-        echo -e "${RED}失败${NC}" # Failed
-        echo -e "${RED}错误: 无法应用限速规则。请检查权限或TC命令。${NC}" # Error: Unable to apply speed limit rules. Please check permissions or TC command.
-        log_message "ERROR" "无法应用限速规则。"
+        echo -e "${RED}失败 (上传)${NC}" # Failed (upload)
+        log_message "ERROR" "上传限速规则应用失败。"
         return 1
     fi
+
+    # 应用下载 (ingress) 限速
+    # 为 ingress 创建一个 qdisc，然后使用 filter 将所有进入的流量重定向到 ifb 设备进行处理。
+    # ifb (Intermediate Functional Block) 是一个虚拟设备，允许对入站流量应用 egress qdisc。
+    # 确保 ifb 设备已加载
+    if ! lsmod | grep -q ifb; then
+        modprobe ifb || { echo -e "${RED}错误: 无法加载 ifb 模块。请检查内核配置。${NC}"; log_message "ERROR" "无法加载 ifb 模块。"; return 1; }
+        ip link add ifb0 type ifb || { echo -e "${RED}错误: 无法创建 ifb0 设备。${NC}"; log_message "ERROR" "无法创建 ifb0 设备。"; return 1; }
+        ip link set dev ifb0 up || { echo -e "${RED}错误: 无法启用 ifb0 设备。${NC}"; log_message "ERROR" "无法启用 ifb0 设备。"; return 1; }
+        log_message "INFO" "ifb0 设备已创建并启用。"
+    fi
+
+    if tc qdisc add dev "$INTERFACE" handle ffff: ingress && \
+       tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0 && \
+       tc qdisc add dev ifb0 root handle 1: htb default 30 && \
+       tc class add dev ifb0 parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
+       tc class add dev ifb0 parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
+       tc filter add dev ifb0 protocol ip parent 1:0 prio 1 u32 match ip src 0.0.0.0/0 flowid 1:10; then
+        log_message "INFO" "下载限速已应用: ${SPEED_LIMIT}KB/s"
+    else
+        echo -e "${RED}失败 (下载)${NC}" # Failed (download)
+        log_message "ERROR" "下载限速规则应用失败。"
+        # 如果下载限速失败，应该尝试移除上传限速以保持一致性
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
+        return 1
+    fi
+
+    echo -e "${GREEN}完成${NC}" # Complete
+    sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
+    LIMIT_ENABLED="true" # 更新缓存值
+    log_message "INFO" "上传和下载限速已启用: ${SPEED_LIMIT}KB/s"
+    echo -e "${GREEN}上传和下载限速已启用: ${SPEED_LIMIT}KB/s${NC}" # Upload and download speed limit enabled:
+    return 0
 }
 
-# 移除限速
+# 移除限速 (同时移除上传和下载)
 remove_speed_limit() {
-    echo -e "${YELLOW}移除限速设置...${NC}" # Removing speed limit settings...
-    log_message "INFO" "尝试移除限速。"
-    echo -n "${YELLOW}清除限速规则...${NC}" # Clearing speed limit rules...
+    echo -e "${YELLOW}移除限速设置 (上传和下载)...${NC}" # Removing speed limit settings (upload and download)...
+    log_message "INFO" "尝试移除上传和下载限速。"
+    echo -n "${YELLOW}清除上传限速规则...${NC}" # Clearing upload speed limit rules...
     if tc qdisc del dev "$INTERFACE" root 2>/dev/null; then
         echo -e "${GREEN}完成${NC}" # Complete
     else
         echo -e "${YELLOW}无规则或失败${NC}" # No rules or failed
-        log_message "WARN" "删除旧的TC qdisc 失败或不存在。"
+        log_message "WARN" "删除旧的TC egress qdisc 失败或不存在。"
     fi
+
+    echo -n "${YELLOW}清除下载限速规则...${NC}" # Clearing download speed limit rules...
+    if tc qdisc del dev "$INTERFACE" ingress 2>/dev/null && \
+       tc qdisc del dev ifb0 root 2>/dev/null; then # 移除 ifb 上的根 qdisc
+        echo -e "${GREEN}完成${NC}" # Complete
+    else
+        echo -e "${YELLOW}无规则或失败${NC}" # No rules or failed
+        log_message "WARN" "删除旧的TC ingress qdisc 或 ifb0 上的 qdisc 失败或不存在。"
+    fi
+
+    # 关闭并移除 ifb 设备（如果存在且不再需要）
+    if ip link show ifb0 &>/dev/null; then
+        ip link set dev ifb0 down 2>/dev/null || log_message "WARN" "关闭 ifb0 设备失败。"
+        ip link del ifb0 type ifb 2>/dev/null || log_message "WARN" "删除 ifb0 设备失败。"
+        log_message "INFO" "ifb0 设备已关闭并移除。"
+    fi
+
     sed -i.bak "s/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/" "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_message "ERROR" "更新 LIMIT_ENABLED 失败。"
     LIMIT_ENABLED="false" # 更新缓存值
-    log_message "INFO" "限速已移除。"
-    echo -e "${GREEN}限速已移除${NC}" # Speed limit removed.
+    log_message "INFO" "上传和下载限速已移除。"
+    echo -e "${GREEN}上传和下载限速已移除${NC}" # Upload and download speed limit removed.
 }
 
 # 网络速度测试
@@ -911,7 +957,7 @@ modify_config() {
             fi
         else
             echo -e "${RED}输入无效，限速速度未更改。${NC}" # Invalid input, speed limit not changed.
-        fi
+        }
     fi
     echo ""
     echo -e "${GREEN}配置修改完成。${NC}" # Configuration modification complete.
@@ -1051,7 +1097,19 @@ if [ "$current_day" != "$LAST_RESET_DATE" ]; then
     
     # 如果限速在昨天是启用的，则在新的一天自动解除
     if [ "$LIMIT_ENABLED" = "true" ]; then
-        tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC qdisc 失败或不存在。"
+        # 移除 egress (上传) 规则
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC egress qdisc 失败或不存在。"
+        # 移除 ingress (下载) 规则
+        tc qdisc del dev "$INTERFACE" ingress 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC ingress qdisc 失败或不存在。"
+        tc qdisc del dev ifb0 root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 上的 qdisc 失败或不存在。"
+        
+        # 关闭并移除 ifb 设备（如果存在）
+        if ip link show ifb0 &>/dev/null; then
+            ip link set dev ifb0 down 2>/dev/null || log_monitor_message "WARN" "monitor: 关闭 ifb0 设备失败。"
+            ip link del ifb0 type ifb 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 设备失败。"
+            log_monitor_message "INFO" "ifb0 设备已关闭并移除。"
+        fi
+
         sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
         log_monitor_message "INFO" "新的一天，自动解除限速。"
     fi
@@ -1093,16 +1151,46 @@ limit_reached=$(echo "$used_gb >= $DAILY_LIMIT" | bc 2>/dev/null || echo "0")
 if [ "$limit_reached" -eq 1 ] && [ "$LIMIT_ENABLED" != "true" ]; then
     # 自动启用限速
     local speed_bps=$((SPEED_LIMIT * 8 * 1024))
-    tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC qdisc 失败或不存在 (自动限速前)。"
     
+    # 清除旧规则（如果存在）
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC egress qdisc 失败或不存在 (自动限速前)。"
+    tc qdisc del dev "$INTERFACE" ingress 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC ingress qdisc 失败或不存在 (自动限速前)。"
+    tc qdisc del dev ifb0 root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 上的 qdisc 失败或不存在 (自动限速前)。"
+
+    # 应用上传 (egress) 限速
     if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 && \
        tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
        tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
        tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
-        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败 (自动限速)。"
-        log_monitor_message "INFO" "自动限速触发: 使用量=${used_gb}GB, 速度=${SPEED_LIMIT}KB/s"
+        log_monitor_message "INFO" "自动上传限速触发: ${SPEED_LIMIT}KB/s"
     else
-        log_monitor_message "ERROR" "monitor: 自动限速规则应用失败。"
+        log_monitor_message "ERROR" "monitor: 自动上传限速规则应用失败。"
+        # 如果上传限速失败，标记为未启用
+        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
+        return # 退出，因为限速未完全应用
+    fi
+
+    # 应用下载 (ingress) 限速
+    if ! lsmod | grep -q ifb; then
+        modprobe ifb || { log_monitor_message "ERROR" "monitor: 无法加载 ifb 模块。"; return 1; }
+        ip link add ifb0 type ifb || { log_monitor_message "ERROR" "monitor: 无法创建 ifb0 设备。"; return 1; }
+        ip link set dev ifb0 up || { log_monitor_message "ERROR" "monitor: 无法启用 ifb0 设备。"; return 1; }
+        log_monitor_message "INFO" "monitor: ifb0 设备已创建并启用。"
+    fi
+
+    if tc qdisc add dev "$INTERFACE" handle ffff: ingress && \
+       tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0 && \
+       tc qdisc add dev ifb0 root handle 1: htb default 30 && \
+       tc class add dev ifb0 parent 1: classid 1:1 htb rate "${speed_bps}bit" && \
+       tc class add dev ifb0 parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" && \
+       tc filter add dev ifb0 protocol ip parent 1:0 prio 1 u32 match ip src 0.0.0.0/0 flowid 1:10; then
+        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=true/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败 (自动限速)。"
+        log_monitor_message "INFO" "自动下载限速触发: 使用量=${used_gb}GB, 速度=${SPEED_LIMIT}KB/s"
+    else
+        log_monitor_message "ERROR" "monitor: 自动下载限速规则应用失败。"
+        # 如果下载限速失败，尝试移除上传限速以保持一致性
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
+        sed -i.bak 's/^LIMIT_ENABLED=.*/LIMIT_ENABLED=false/' "$CONFIG_FILE" && rm "$CONFIG_FILE.bak" || log_monitor_message "ERROR" "monitor: 更新 LIMIT_ENABLED 失败。"
     fi
 fi
 EOF
@@ -1293,7 +1381,7 @@ show_status() {
     
     # 限速状态
     if [ "$LIMIT_ENABLED" = "true" ]; then
-        echo -e "${RED}⚠️  限速状态: 已启用 (${SPEED_LIMIT}KB/s)${NC}" # Speed limit status: Enabled
+        echo -e "${RED}⚠️  限速状态: 已启用 (${SPEED_LIMIT}KB/s - 上传和下载)${NC}" # Speed limit status: Enabled (upload and download)
     else
         echo -e "${GREEN}✅ 限速状态: 未启用${NC}" # Speed limit status: Not enabled
     fi
@@ -1402,10 +1490,18 @@ uninstall_all() {
        for iface in "${interfaces_to_check[@]}"; do
            if [ -n "$iface" ]; then # 确保接口名称不为空
                tc qdisc del dev "$iface" root 2>/dev/null || true
-               log_message "INFO" "尝试移除接口 $iface 上的限速规则。"
+               tc qdisc del dev "$iface" ingress 2>/dev/null || true
+               log_message "INFO" "尝试移除接口 $iface 上的上传和下载限速规则。"
            fi
        done
        
+       # 移除 ifb 设备（如果存在）
+       if ip link show ifb0 &>/dev/null; then
+           ip link set dev ifb0 down 2>/dev/null || log_message "WARN" "卸载: 关闭 ifb0 设备失败。"
+           ip link del ifb0 type ifb 2>/dev/null || log_message "WARN" "卸载: 删除 ifb0 设备失败。"
+           log_message "INFO" "ifb0 设备已关闭并移除。"
+       fi
+
        # 删除文件
        rm -f "$CONFIG_FILE" || log_message "WARN" "删除配置文件失败。"
        rm -f "$SERVICE_FILE" || log_message "WARN" "删除服务文件失败。"
