@@ -3,9 +3,8 @@
 # install_ce.sh - 流量限速管理系统 (Traffic Limiting Management System)
 # 系统要求: Ubuntu 24.04.2 LTS (用户提供信息: Ubuntu 24.04, vnStat 2.12)
 # 功能: vnStat + tc 流量监控与限速 (Traffic Monitoring and Limiting with vnStat + tc)
-# 新增功能: 每月流量统计与管理, IP 白名单/黑名单, 灵活限速模式, 服务状态检查与修复, 数据持久化
+# 新增功能: 每月流量统计与管理 (Monthly traffic statistics and management)
 # 优化说明: 增强错误处理、模块化函数、改进用户体验、TC命令健壮性、sed原子更新、jq解析vnStat数据。
-# 界面美化: 更精美的边框、统一排版、增强图标、醒目交互提示。
 
 # ==============================================================================
 # 脚本配置和变量定义
@@ -28,6 +27,10 @@ WHITE='\033[1;37m'
 MAGENTA='\033[0;35m'
 NC='\033[0m' # No Color
 
+# 字体样式
+BOLD='\033[1m'
+UNDERLINE='\033[4m'
+
 # 配置文件路径
 CONFIG_FILE="/etc/ce_traffic_limit.conf"
 SERVICE_FILE="/etc/systemd/system/ce-traffic-monitor.service"
@@ -36,7 +39,6 @@ MONITOR_SCRIPT="/usr/local/bin/ce-monitor"
 SCRIPT_PATH="/usr/local/bin/ce" # 用户交互快捷命令
 INSTALLER_PATH="/usr/local/bin/install_ce.sh" # 安装脚本本身被复制到这里
 TRAFFIC_LOG="/var/log/ce-daily-traffic.log" # 流量日志文件
-PERSISTENCE_FILE="/var/lib/ce_traffic_limit_data.conf" # 流量计数器持久化文件
 
 # 脚本更新的远程URL
 SCRIPT_REMOTE_URL="https://raw.githubusercontent.com/Alanniea/ce/main/install_ce.sh"
@@ -48,15 +50,12 @@ SPEED_LIMIT=
 MONTHLY_LIMIT=
 INTERFACE=
 LIMIT_ENABLED=
-LIMIT_MODE="" # "all", "download", "upload"
 LAST_RESET_DATE=
 DAILY_START_RX=
 DAILY_START_TX=
 LAST_MONTHLY_RESET_DATE=
 MONTHLY_START_RX=
 MONTHLY_START_TX=
-IP_WHITELIST="" # 逗号分隔的IP地址
-IP_BLACKLIST="" # 逗号分隔的IP地址
 
 # 缓存系统信息，避免重复调用外部命令
 CACHED_OS_VERSION=""
@@ -110,7 +109,7 @@ detect_interface() {
     if [ -z "$INTERFACE" ] || ! ip link show "$INTERFACE" &>/dev/null; then
         echo -e "${RED}❌ 无法自动检测有效网卡，请手动选择:${NC}"
         ip link show | grep -E "^[0-9]+:" | awk -F': ' '{print $2}' | grep -v lo || echo "无可用网卡"
-        read -rp "${YELLOW}➜ 请输入网卡名称: ${NC}" INTERFACE
+        read -rp "${YELLOW}请输入网卡名称: ${NC}" INTERFACE
         if [ -z "$INTERFACE" ]; then
             log_message "ERROR" "未输入网卡名称，安装中止。"
             echo -e "${RED}🛑 未输入网卡名称，安装中止。${NC}"
@@ -211,39 +210,6 @@ update_config_value() {
     fi
 }
 
-# 将当前流量计数器保存到持久化文件
-persist_traffic_data() {
-    local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
-    local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
-    
-    cat > "$PERSISTENCE_FILE" << EOF
-LAST_RESET_DATE_PERSIST=${LAST_RESET_DATE}
-DAILY_START_RX_PERSIST=${DAILY_START_RX}
-DAILY_START_TX_PERSIST=${DAILY_START_TX}
-LAST_MONTHLY_RESET_DATE_PERSIST=${LAST_MONTHLY_RESET_DATE}
-MONTHLY_START_RX_PERSIST=${MONTHLY_START_RX}
-MONTHLY_START_TX_PERSIST=${MONTHLY_START_TX}
-EOF
-    log_message "INFO" "流量计数器数据已持久化到 $PERSISTENCE_FILE"
-}
-
-# 从持久化文件加载流量计数器
-load_persisted_traffic_data() {
-    if [ -f "$PERSISTENCE_FILE" ] && [ -r "$PERSISTENCE_FILE" ]; then
-        log_message "INFO" "尝试从 $PERSISTENCE_FILE 加载持久化流量数据。"
-        source "$PERSISTENCE_FILE"
-        LAST_RESET_DATE=${LAST_RESET_DATE_PERSIST:-$(date +%Y-%m-%d)}
-        DAILY_START_RX=${DAILY_START_RX_PERSIST:-0}
-        DAILY_START_TX=${DAILY_START_TX_PERSIST:-0}
-        LAST_MONTHLY_RESET_DATE=${LAST_MONTHLY_RESET_DATE_PERSIST:-$(date +%Y-%m)}
-        MONTHLY_START_RX=${MONTHLY_START_RX_PERSIST:-0}
-        MONTHLY_START_TX=${MONTHLY_START_TX_PERSIST:-0}
-        log_message "INFO" "成功从 $PERSISTENCE_FILE 加载数据。"
-    else
-        log_message "WARN" "持久化文件 $PERSISTENCE_FILE 不存在或无法读取。"
-    fi
-}
-
 # 初始化每日流量计数器
 init_daily_counter() {
     local today=$(date +%Y-%m-%d)
@@ -258,7 +224,6 @@ init_daily_counter() {
     update_config_value "DAILY_START_TX" "$current_tx"
     update_config_value "LAST_RESET_DATE" "$today"
     
-    persist_traffic_data # 持久化更新后的计数器
     log_message "INFO" "初始化每日计数器: RX=$(format_traffic "$current_rx"), TX=$(format_traffic "$current_tx")"
 }
 
@@ -276,7 +241,6 @@ init_monthly_counter() {
     update_config_value "MONTHLY_START_TX" "$current_tx"
     update_config_value "LAST_MONTHLY_RESET_DATE" "$this_month"
     
-    persist_traffic_data # 持久化更新后的计数器
     log_message "INFO" "初始化每月计数器: RX=$(format_traffic "$current_rx"), TX=$(format_traffic "$current_tx")"
 }
 
@@ -292,15 +256,12 @@ SPEED_LIMIT=${SPEED_LIMIT:-512}
 MONTHLY_LIMIT=${MONTHLY_LIMIT:-$default_monthly_limit}
 INTERFACE=$INTERFACE
 LIMIT_ENABLED=false
-LIMIT_MODE="all" # all, download, upload
 LAST_RESET_DATE=$today
 DAILY_START_RX=0
 DAILY_START_TX=0
 LAST_MONTHLY_RESET_DATE=$this_month
 MONTHLY_START_RX=0
 MONTHLY_START_TX=0
-IP_WHITELIST=""
-IP_BLACKLIST=""
 EOF
     
     # 初始化每日和每月流量计数器
@@ -323,21 +284,15 @@ load_config() {
         MONTHLY_LIMIT=${MONTHLY_LIMIT:-$(echo "$DAILY_LIMIT * 10" | bc)}
         INTERFACE=${INTERFACE:-}
         LIMIT_ENABLED=${LIMIT_ENABLED:-false}
-        LIMIT_MODE=${LIMIT_MODE:-"all"} # 新增变量
         LAST_RESET_DATE=${LAST_RESET_DATE:-$(date +%Y-%m-%d)}
         DAILY_START_RX=${DAILY_START_RX:-0}
         DAILY_START_TX=${DAILY_START_TX:-0}
         LAST_MONTHLY_RESET_DATE=${LAST_MONTHLY_RESET_DATE:-$(date +%Y-%m)}
         MONTHLY_START_RX=${MONTHLY_START_RX:-0}
         MONTHLY_START_TX=${MONTHLY_START_TX:-0}
-        IP_WHITELIST=${IP_WHITELIST:-""} # 新增变量
-        IP_BLACKLIST=${IP_BLACKLIST:-""} # 新增变量
-
-        # 尝试加载持久化数据，覆盖默认值
-        load_persisted_traffic_data
     else
         if [[ "$*" == *"--interactive"* ]]; then
-            echo -e "${RED}❌ 错误: 配置文件 ${WHITE}$CONFIG_FILE${RED} 不存在或无法读取。${NC}"
+            echo -e "${RED}❌ 错误: 配置文件 $CONFIG_FILE 不存在或无法读取。${NC}"
             echo -e "${YELLOW}💡 请先运行安装脚本来初始化系统。${NC}"
             log_message "ERROR" "配置文件 $CONFIG_FILE 不存在或无法读取，交互模式中止。"
             exit 1
@@ -408,11 +363,8 @@ get_vnstat_bytes() {
 # 获取每日流量使用量 (字节) - 优先使用系统网卡统计，负值或异常时回退到 vnStat
 get_daily_usage_bytes() {
     local current_stats=($(get_current_interface_bytes))
-    local current_rx=${current_stats[0]}
-    local current_tx=${current_stats[1]}
-    
-    local daily_rx=$((current_rx - DAILY_START_RX))
-    local daily_tx=$((current_tx - DAILY_START_TX))
+    local daily_rx=$((current_stats[0] - DAILY_START_RX))
+    local daily_tx=$((current_stats[1] - DAILY_START_TX))
     local daily_total=$((daily_rx + daily_tx))
     
     if [ "$daily_total" -lt 0 ]; then
@@ -426,11 +378,8 @@ get_daily_usage_bytes() {
 # 获取每月流量使用量 (字节) - 优先使用系统网卡统计，负值或异常时回退到 vnStat
 get_monthly_usage_bytes() {
     local current_stats=($(get_current_interface_bytes))
-    local current_rx=${current_stats[0]}
-    local current_tx=${current_stats[1]}
-    
-    local monthly_rx=$((current_rx - MONTHLY_START_RX))
-    local monthly_tx=$((current_tx - MONTHLY_START_TX))
+    local monthly_rx=$((current_stats[0] - MONTHLY_START_RX))
+    local monthly_tx=$((current_stats[1] - MONTHLY_START_TX))
     local monthly_total=$((monthly_rx + monthly_tx))
 
     if [ "$monthly_total" -lt 0 ]; then
@@ -515,7 +464,7 @@ force_refresh() {
     log_message "INFO" "执行强制刷新流量统计。"
     
     vnstat -i "$INTERFACE" --force 2>/dev/null || log_message "WARN" "vnStat --force 失败，接口可能不存在。"
-    systemctl restart vnstat &>/dev/null || log_message "WARN" "重启 vnstat 服务失败。"
+    systemctl restart vnstat 2>/dev/null || log_message "WARN" "重启 vnstat 服务失败。"
     sleep 3 # 给 vnStat 一些时间来更新
     
     load_config # 重新加载配置以获取最新状态
@@ -543,50 +492,57 @@ check_monthly_limit() {
     echo "$limit_reached"
 }
 
-# 移除所有限速规则
-remove_all_tc_rules() {
-    log_message "INFO" "正在清除所有TC限速规则..."
+# 应用限速 (同时限制上传和下载)
+apply_speed_limit() {
+    echo -e "${YELLOW}🚦 应用限速设置 (上传和下载)...${NC}"
+    log_message "INFO" "尝试应用上传和下载限速。"
+    
+    if ! ip link show "$INTERFACE" &>/dev/null; then
+        echo -e "${RED}❌ 错误: 网卡 '$INTERFACE' 不存在或无效，无法应用限速。${NC}"
+        log_message "ERROR" "网卡 '$INTERFACE' 无效，无法应用限速。"
+        return 1
+    fi
+
     echo -n "${YELLOW}🗑️ 清除旧限速规则...${NC}"
+    # 清除 egress (上传) 规则
     if tc qdisc del dev "$INTERFACE" root 2>/dev/null; then
         echo -e "${GREEN}完成 egress${NC}"
     else
         echo -e "${YELLOW}无旧 egress 规则或失败${NC}"
     fi
+    # 清除 ingress (下载) 规则
     if tc qdisc del dev "$INTERFACE" ingress 2>/dev/null; then
         echo -e "${GREEN}完成 ingress${NC}"
     else
         echo -e "${YELLOW}无旧 ingress 规则或失败${NC}"
     fi
-    if tc qdisc del dev ifb0 root 2>/dev/null; then
-        log_message "INFO" "已删除 ifb0 上的 qdisc。"
-    fi
-    if ip link show ifb0 &>/dev/null; then
-        ip link set dev ifb0 down 2>/dev/null || log_message "WARN" "关闭 ifb0 设备失败。"
-        ip link del ifb0 type ifb 2>/dev/null || log_message "WARN" "删除 ifb0 设备失败。"
-        log_message "INFO" "ifb0 设备已关闭并移除。"
-    fi
-    log_message "INFO" "所有TC qdisc已清除。"
-}
-
-# 应用下载限速
-apply_download_limit() {
+    log_message "INFO" "删除旧的TC qdisc (egress 和 ingress)。"
+    
     local speed_bps=$((SPEED_LIMIT * 8 * 1024))
-    echo -e "${YELLOW}🚀 应用下载限速规则 (${SPEED_LIMIT}KB/s)...${NC}"
-    log_message "INFO" "尝试应用下载限速。"
-
-    if ! ip link show "$INTERFACE" &>/dev/null; then
-        echo -e "${RED}❌ 错误: 网卡 '${WHITE}$INTERFACE${RED}' 不存在或无效，无法应用限速。${NC}"
-        log_message "ERROR" "网卡 '$INTERFACE' 无效，无法应用限速。"
+    
+    echo -n "${YELLOW}🚀 应用新限速规则 (${SPEED_LIMIT}KB/s，上传和下载)...${NC}"
+    
+    # 应用上传 (egress) 限速
+    if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 \
+       && tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" \
+       && tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
+       && tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
+        log_message "INFO" "上传限速已应用: ${SPEED_LIMIT}KB/s"
+    else
+        echo -e "${RED}❌ 失败 (上传)${NC}"
+        log_message "ERROR" "上传限速规则应用失败。"
+        # 如果上传失败，退出，不继续应用下载限速
         return 1
     fi
 
+    # 应用下载 (ingress) 限速
     # 确保 ifb 设备已加载和创建
     if ! lsmod | grep -q ifb; then
-        modprobe ifb || { echo -e "${RED}❌ 错误: 无法加载 ifb 模块。请检查内核配置。${NC}"; log_message "ERROR" "无法加载 ifb 模块。"; return 1; }
+        modprobe ifb || { echo -e "${RED}❌ 错误: 无法加载 ifb 模块。请检查内核配置。${NC}"; log_message "ERROR" "无法加载 ifb 模块。"; tc qdisc del dev "$INTERFACE" root 2>/dev/null || true; return 1; }
     fi
     if ! ip link show ifb0 &>/dev/null; then
-        ip link add ifb0 type ifb || { echo -e "${RED}❌ 错误: 无法创建 ifb0 设备。${NC}"; log_message "ERROR" "无法创建 ifb0 设备。"; return 1; }
-        ip link set dev ifb0 up || { echo -e "${RED}❌ 错误: 无法启用 ifb0 设备。${NC}"; log_message "ERROR" "无法启用 ifb0 设备。"; return 1; }
+        ip link add ifb0 type ifb || { echo -e "${RED}❌ 错误: 无法创建 ifb0 设备。${NC}"; log_message "ERROR" "无法创建 ifb0 设备。"; tc qdisc del dev "$INTERFACE" root 2>/dev/null || true; return 1; }
+        ip link set dev ifb0 up || { echo -e "${RED}❌ 错误: 无法启用 ifb0 设备。${NC}"; log_message "ERROR" "无法启用 ifb0 设备。"; tc qdisc del dev "$INTERFACE" root 2>/dev/null || true; return 1; }
         log_message "INFO" "ifb0 设备已创建并启用。"
     fi
 
@@ -597,125 +553,61 @@ apply_download_limit() {
        && tc class add dev ifb0 parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
        && tc filter add dev ifb0 protocol ip parent 1:0 prio 1 u32 match ip src 0.0.0.0/0 flowid 1:10; then
         log_message "INFO" "下载限速已应用: ${SPEED_LIMIT}KB/s"
-        echo -e "${GREEN}✅ 下载限速已启用: ${SPEED_LIMIT}KB/s${NC}"
-        return 0
     else
         echo -e "${RED}❌ 失败 (下载)${NC}"
         log_message "ERROR" "下载限速规则应用失败。"
-        return 1
-    fi
-}
-
-# 应用上传限速
-apply_upload_limit() {
-    local speed_bps=$((SPEED_LIMIT * 8 * 1024))
-    echo -e "${YELLOW}🚀 应用上传限速规则 (${SPEED_LIMIT}KB/s)...${NC}"
-    log_message "INFO" "尝试应用上传限速。"
-    
-    if ! ip link show "$INTERFACE" &>/dev/null; then
-        echo -e "${RED}❌ 错误: 网卡 '${WHITE}$INTERFACE${RED}' 不存在或无效，无法应用限速。${NC}"
-        log_message "ERROR" "网卡 '$INTERFACE' 无效，无法应用限速。"
+        # 如果下载限速失败，应该尝试移除上传限速以保持一致性
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
         return 1
     fi
 
-    if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 \
-       && tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" \
-       && tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
-       && tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
-        log_message "INFO" "上传限速已应用: ${SPEED_LIMIT}KB/s"
-        echo -e "${GREEN}✅ 上传限速已启用: ${SPEED_LIMIT}KB/s${NC}"
-        return 0
-    else
-        echo -e "${RED}❌ 失败 (上传)${NC}"
-        log_message "ERROR" "上传限速规则应用失败。"
-        return 1
-    fi
+    echo -e "${GREEN}✅ 完成${NC}"
+    update_config_value "LIMIT_ENABLED" "true"
+    LIMIT_ENABLED="true" # 更新缓存值
+    log_message "INFO" "上传和下载限速已启用: ${SPEED_LIMIT}KB/s"
+    echo -e "${GREEN}🚀 上传和下载限速已启用: ${SPEED_LIMIT}KB/s${NC}"
+    return 0
 }
 
-# 根据配置的 LIMIT_MODE 应用限速
-apply_speed_limit() {
-    remove_all_tc_rules # 每次应用前先清除旧规则
-    
-    if [ "$SPEED_LIMIT" -le 0 ]; then
-        echo -e "${YELLOW}ℹ️ 限速速度设置为0，不应用限速。${NC}"
-        update_config_value "LIMIT_ENABLED" "false"
-        LIMIT_ENABLED="false"
-        return 0
-    fi
-
-    echo -e "${YELLOW}🚦 正在根据 '${WHITE}${LIMIT_MODE}${YELLOW}' 模式应用限速...${NC}"
-    case "$LIMIT_MODE" in
-        "all")
-            if apply_upload_limit && apply_download_limit; then
-                update_config_value "LIMIT_ENABLED" "true"
-                LIMIT_ENABLED="true"
-                log_message "INFO" "全局限速已启用: ${SPEED_LIMIT}KB/s"
-                echo -e "${GREEN}🚀 全局限速已启用: ${SPEED_LIMIT}KB/s${NC}"
-                return 0
-            else
-                update_config_value "LIMIT_ENABLED" "false"
-                LIMIT_ENABLED="false"
-                log_message "ERROR" "全局限速应用失败。"
-                echo -e "${RED}❌ 全局限速应用失败。${NC}"
-                return 1
-            fi
-            ;;
-        "download")
-            if apply_download_limit; then
-                update_config_value "LIMIT_ENABLED" "true"
-                LIMIT_ENABLED="true"
-                log_message "INFO" "仅下载限速已启用: ${SPEED_LIMIT}KB/s"
-                echo -e "${GREEN}⬇️ 仅下载限速已启用: ${SPEED_LIMIT}KB/s${NC}"
-                return 0
-            else
-                update_config_value "LIMIT_ENABLED" "false"
-                LIMIT_ENABLED="false"
-                log_message "ERROR" "仅下载限速应用失败。"
-                echo -e "${RED}❌ 仅下载限速应用失败。${NC}"
-                return 1
-            fi
-            ;;
-        "upload")
-            if apply_upload_limit; then
-                update_config_value "LIMIT_ENABLED" "true"
-                LIMIT_ENABLED="true"
-                log_message "INFO" "仅上传限速已启用: ${SPEED_LIMIT}KB/s"
-                echo -e "${GREEN}⬆️ 仅上传限速已启用: ${SPEED_LIMIT}KB/s${NC}"
-                return 0
-            else
-                update_config_value "LIMIT_ENABLED" "false"
-                LIMIT_ENABLED="false"
-                log_message "ERROR" "仅上传限速应用失败。"
-                echo -e "${RED}❌ 仅上传限速应用失败。${NC}"
-                return 1
-            fi
-            ;;
-        *)
-            echo -e "${RED}❌ 无效的限速模式: ${WHITE}${LIMIT_MODE}${NC}"
-            log_message "ERROR" "无效的限速模式: ${LIMIT_MODE}"
-            update_config_value "LIMIT_ENABLED" "false"
-            LIMIT_ENABLED="false"
-            return 1
-            ;;
-    esac
-}
-
-# 移除限速
+# 移除限速 (同时移除上传和下载)
 remove_speed_limit() {
-    echo -e "${YELLOW}🛑 移除所有限速设置...${NC}"
-    log_message "INFO" "尝试移除所有限速设置。"
-    remove_all_tc_rules
+    echo -e "${YELLOW}🛑 移除限速设置 (上传和下载)...${NC}"
+    log_message "INFO" "尝试移除上传和下载限速。"
+    
+    echo -n "${YELLOW}🗑️ 清除上传限速规则...${NC}"
+    if tc qdisc del dev "$INTERFACE" root 2>/dev/null; then
+        echo -e "${GREEN}完成${NC}"
+    else
+        echo -e "${YELLOW}无规则或失败${NC}"
+        log_message "WARN" "删除旧的TC egress qdisc 失败或不存在。"
+    fi
+
+    echo -n "${YELLOW}🗑️ 清除下载限速规则...${NC}"
+    if tc qdisc del dev "$INTERFACE" ingress 2>/dev/null && \
+       tc qdisc del dev ifb0 root 2>/dev/null; then
+        echo -e "${GREEN}完成${NC}"
+    else
+        echo -e "${YELLOW}无规则或失败${NC}"
+        log_message "WARN" "删除旧的TC ingress qdisc 或 ifb0 上的 qdisc 失败或不存在。"
+    fi
+
+    if ip link show ifb0 &>/dev/null; then
+        ip link set dev ifb0 down 2>/dev/null || log_message "WARN" "关闭 ifb0 设备失败。"
+        ip link del ifb0 type ifb 2>/dev/null || log_message "WARN" "删除 ifb0 设备失败。"
+        log_message "INFO" "ifb0 设备已关闭并移除。"
+    fi
+
     update_config_value "LIMIT_ENABLED" "false"
     LIMIT_ENABLED="false" # 更新缓存值
-    log_message "INFO" "所有限速已移除。"
-    echo -e "${GREEN}✅ 所有限速已移除${NC}"
+    log_message "INFO" "上传和下载限速已移除。"
+    echo -e "${GREEN}✅ 上传和下载限速已移除${NC}"
 }
 
 # 网络速度测试
 speed_test() {
     echo -e "${BLUE}⚡ 开始网络速度测试...${NC}"
     echo -e "${YELLOW}⚠️ 注意: 测试会消耗流量，请确认继续 (y/N): ${NC}"
-    read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_test
+    read -rp "${WHITE}请输入 (y/N): ${NC}" confirm_test
     if [[ ! "$confirm_test" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}🚫 已取消测试${NC}"
         log_message "INFO" "用户取消了速度测试。"
@@ -727,7 +619,7 @@ speed_test() {
 
     if ! command -v speedtest-cli &> /dev/null; then
         echo -n "${YELLOW}⬇️ 安装speedtest-cli...${NC}"
-        (apt update -qq && apt install -y speedtest-cli &>/dev/null) &
+        (apt install -y speedtest-cli &>/dev/null) &
         show_progress $!
         wait $!
         if [ $? -ne 0 ]; then
@@ -828,8 +720,9 @@ show_realtime_speed() {
     tx_bytes_prev=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
     
     echo ""
-    echo -e "${WHITE}⬇️ 下载速度: calculating...${NC}"
-    echo -e "${WHITE}⬆️ 上传速度: calculating...${NC}"
+    # 预留空间以便后续覆盖
+    echo -e "${WHITE}⬇️ 下载速度: ${NC}"
+    echo -e "${WHITE}⬆️ 上传速度: ${NC}"
     echo ""
 
     while true; do
@@ -859,7 +752,7 @@ show_realtime_speed() {
         echo ""
 
         rx_bytes_prev=$rx_bytes_curr
-        tx_bytes_curr=$tx_bytes_curr
+        tx_bytes_prev=$tx_bytes_curr
     done
     tput cnorm # 恢复光标
     trap - INT # 恢复默认的 Ctrl+C 行为
@@ -880,7 +773,7 @@ show_advanced_vnstat_stats() {
         echo -e "${RED}❌ 无法获取小时统计数据，请检查vnStat是否正常工作。${NC}"
         log_message "ERROR" "无法获取vnStat小时统计数据。"
     fi
-    read -rp "${CYAN}➜ 按回车键继续...${NC}"
+    read -rp "${CYAN}按回车键继续...${NC}"
     clear
 
     echo -e "${WHITE}--- 🗓️ 最近30天流量 (Daily Traffic for Last 30 Days) ---${NC}"
@@ -889,7 +782,7 @@ show_advanced_vnstat_stats() {
         echo -e "${RED}❌ 无法获取每日统计数据，请检查vnStat是否正常工作。${NC}"
         log_message "ERROR" "无法获取vnStat每日统计数据。"
     fi
-    read -rp "${CYAN}➜ 按回车键继续...${NC}"
+    read -rp "${CYAN}按回车键继续...${NC}"
     clear
 
     echo -e "${WHITE}--- 📆 最近12个月流量 (Monthly Traffic for Last 12 Months) ---${NC}"
@@ -898,7 +791,7 @@ show_advanced_vnstat_stats() {
         echo -e "${RED}❌ 无法获取每月统计数据，请检查vnStat是否正常工作。${NC}"
         log_message "ERROR" "无法获取vnStat每月统计数据。"
     fi
-    read -rp "${CYAN}➜ 按回车键继续...${NC}"
+    read -rp "${CYAN}按回车键继续...${NC}"
     clear
     echo -e "${GREEN}✅ 高级流量统计显示完成。${NC}"
 }
@@ -918,21 +811,24 @@ show_detailed_stats() {
     local precise_daily_total=$(get_daily_usage_bytes)
     local precise_monthly_total=$(get_monthly_usage_bytes)
 
-    echo -e "${WHITE}🌐 系统网卡统计 (${CYAN}$INTERFACE${WHITE}):${NC}"
+    echo -e "${WHITE}🌐 系统网卡统计 ($INTERFACE):${NC}"
     local current_stats_raw=($(get_current_interface_bytes))
     echo -e "  📥 总接收: ${GREEN}$(format_traffic "${current_stats_raw[0]}")${NC}"
     echo -e "  📤 总发送: ${GREEN}$(format_traffic "${current_stats_raw[1]}")${NC}"
     echo ""
+    echo -e "${CYAN}--------------------------------------------------------------${NC}" # 分隔线
 
-    echo -e "${WHITE}📅 今日统计 (${WHITE}${LAST_RESET_DATE}${WHITE}):${NC}"
-    echo -e "  ➡️ 今日总计: ${GREEN}$(format_traffic "$precise_daily_total")${NC}"
-    echo -e "  ${CYAN}(通过系统网卡计数与vnStat备选精确计算)${NC}"
+    echo -e "${WHITE}📅 今日统计 (${LAST_RESET_DATE}):${NC}"
+    echo -e "  ➡️ 今日总计: ${GREEN}${BOLD}$(format_traffic "$precise_daily_total")${NC}"
+    echo -e "  (通过系统网卡计数与vnStat备选精确计算)${NC}"
     echo ""
+    echo -e "${CYAN}--------------------------------------------------------------${NC}" # 分隔线
 
-    echo -e "${WHITE}🗓️ 本月统计 (${WHITE}${LAST_MONTHLY_RESET_DATE}${WHITE}):${NC}"
-    echo -e "  ➡️ 已用总计: ${GREEN}$(format_traffic "$precise_monthly_total")${NC}"
-    echo -e "  ${CYAN}(通过系统网卡计数与vnStat备选精确计算)${NC}"
+    echo -e "${WHITE}🗓️ 本月统计 (${LAST_MONTHLY_RESET_DATE}):${NC}"
+    echo -e "  ➡️ 本月总计: ${GREEN}${BOLD}$(format_traffic "$precise_monthly_total")${NC}"
+    echo -e "  (通过系统网卡计数与vnStat备选精确计算)${NC}"
     echo ""
+    echo -e "${CYAN}--------------------------------------------------------------${NC}" # 分隔线
     
     local vnstat_daily_bytes=$(get_vnstat_bytes "%Y-%m-%d" "d")
     local vnstat_monthly_bytes=$(get_vnstat_bytes "%Y-%m" "m")
@@ -940,35 +836,34 @@ show_detailed_stats() {
     echo -e "  今日 vnStat 显示: ${CYAN}$(format_traffic "$vnstat_daily_bytes")${NC}"
     echo -e "  本月 vnStat 显示: ${CYAN}$(format_traffic "$vnstat_monthly_bytes")${NC}"
     echo ""
+    echo -e "${CYAN}--------------------------------------------------------------${NC}" # 分隔线
     
     echo -e "${WHITE}📜 最近活动日志:${NC}"
     if [ -f "$TRAFFIC_LOG" ]; then
         if [ "$(wc -l < "$TRAFFIC_LOG")" -gt 0 ]; then
             tail -n 5 "$TRAFFIC_LOG" | while IFS= read -r line; do
-                echo -e "  ${YELLOW}➔ $line${NC}"
+                echo -e "  ${YELLOW}$line${NC}"
             done
         else
             echo -e "  ${YELLOW}暂无日志记录${NC}"
         fi
     else
-        echo -e "  ${YELLOW}日志文件不存在: ${WHITE}$TRAFFIC_LOG${NC}"
+        echo -e "  ${YELLOW}日志文件不存在: $TRAFFIC_LOG${NC}"
     fi
     echo ""
+    echo -e "${CYAN}--------------------------------------------------------------${NC}" # 分隔线
     
     echo -e "${WHITE}⚙️ 当前配置:${NC}"
-    echo -e "  每日限制:     ${GREEN}${DAILY_LIMIT}GB${NC}"
-    echo -e "  每月限制:     ${GREEN}${MONTHLY_LIMIT}GB${NC}"
-    echo -e "  限速速度:     ${GREEN}${SPEED_LIMIT}KB/s${NC}"
-    echo -e "  限速模式:     ${CYAN}${LIMIT_MODE}${NC} (${NC}$(case "$LIMIT_MODE" in "all")echo "上传和下载" ;; "download")echo "仅下载" ;; "upload")echo "仅上传" ;; esac)${NC})"
-    echo -e "  网络接口:     ${CYAN}$INTERFACE${NC}"
-    echo -e "  今日起始日期: ${WHITE}$LAST_RESET_DATE${NC}"
-    echo -e "  今日起始RX:   ${CYAN}$(format_traffic "$DAILY_START_RX")${NC}"
-    echo -e "  今日起始TX:   ${CYAN}$(format_traffic "$DAILY_START_TX")${NC}"
-    echo -e "  本月起始日期: ${WHITE}$LAST_MONTHLY_RESET_DATE${NC}"
-    echo -e "  本月起始RX:   ${CYAN}$(format_traffic "$MONTHLY_START_RX")${NC}"
-    echo -e "  本月起始TX:   ${CYAN}$(format_traffic "$MONTHLY_START_TX")${NC}"
-    echo -e "  IP 白名单:    ${GREEN}${IP_WHITELIST:-无}${NC}"
-    echo -e "  IP 黑名单:    ${RED}${IP_BLACKLIST:-无}${NC}"
+    echo -e "  每日限制: ${GREEN}${DAILY_LIMIT}GB${NC}"
+    echo -e "  每月限制: ${GREEN}${MONTHLY_LIMIT}GB${NC}"
+    echo -e "  限速速度: ${GREEN}${SPEED_LIMIT}KB/s${NC}"
+    echo -e "  网络接口: ${CYAN}$INTERFACE${NC}"
+    echo -e "  今日计数起始日期: ${WHITE}$LAST_RESET_DATE${NC}"
+    echo -e "  今日起始RX: ${CYAN}$(format_traffic "$DAILY_START_RX")${NC}"
+    echo -e "  今日起始TX: ${CYAN}$(format_traffic "$DAILY_START_TX")${NC}"
+    echo -e "  本月计数起始日期: ${WHITE}$LAST_MONTHLY_RESET_DATE${NC}"
+    echo -e "  本月起始RX: ${CYAN}$(format_traffic "$MONTHLY_START_RX")${NC}"
+    echo -e "  本月起始TX: ${CYAN}$(format_traffic "$MONTHLY_START_TX")${NC}"
     echo ""
     echo -e "${YELLOW}💡 提示: 您可以使用菜单中的'修改配置'选项来更改限制值。${NC}"
     echo ""
@@ -977,13 +872,12 @@ show_detailed_stats() {
 # 修改配置
 modify_config() {
     load_config "--interactive"
-    clear
     echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${MAGENTA}║                      🔧 修改配置 ⚙️                          ║${NC}"
     echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "${WHITE}当前每日流量限制: ${GREEN}${DAILY_LIMIT}GB${NC}"
-    read -rp "${CYAN}➜ 请输入新的每日流量限制 (GB, 0为无限制，回车跳过): ${NC}" new_daily_limit
+    read -rp "${CYAN}请输入新的每日流量限制 (GB, 0为无限制，回车跳过): ${NC}" new_daily_limit
     if [[ -n "$new_daily_limit" ]]; then
         if [[ "$new_daily_limit" =~ ^[0-9]+$ ]] && [ "$new_daily_limit" -ge 0 ]; then
             DAILY_LIMIT="$new_daily_limit"
@@ -996,7 +890,7 @@ modify_config() {
 
     echo ""
     echo -e "${WHITE}当前每月流量限制: ${GREEN}${MONTHLY_LIMIT}GB${NC}"
-    read -rp "${CYAN}➜ 请输入新的每月流量限制 (GB, 0为无限制，回车跳过): ${NC}" new_monthly_limit
+    read -rp "${CYAN}请输入新的每月流量限制 (GB, 0为无限制，回车跳过): ${NC}" new_monthly_limit
     if [[ -n "$new_monthly_limit" ]]; then
         if [[ "$new_monthly_limit" =~ ^[0-9]+$ ]] && [ "$new_monthly_limit" -ge 0 ]; then
             MONTHLY_LIMIT="$new_monthly_limit"
@@ -1009,12 +903,11 @@ modify_config() {
 
     echo ""
     echo -e "${WHITE}当前限速速度: ${GREEN}${SPEED_LIMIT}KB/s${NC}"
-    read -rp "${CYAN}➜ 请输入新的限速速度 (KB/s, 0为无限制，回车跳过): ${NC}" new_speed_limit
+    read -rp "${CYAN}请输入新的限速速度 (KB/s, 0为无限制，回车跳过): ${NC}" new_speed_limit
     if [[ -n "$new_speed_limit" ]]; then
         if [[ "$new_speed_limit" =~ ^[0-9]+$ ]] && [ "$new_speed_limit" -ge 0 ]; then
             SPEED_LIMIT="$new_speed_limit"
             update_config_value "SPEED_LIMIT" "$SPEED_LIMIT"
-            echo -e "${GREEN}✅ 限速速度已更新为: ${SPEED_LIMIT}KB/s${NC}"
             if [ "$LIMIT_ENABLED" = "true" ]; then
                 echo -e "${YELLOW}🔄 限速速度已更改，正在重新应用限速规则...${NC}"
                 apply_speed_limit
@@ -1023,206 +916,9 @@ modify_config() {
             echo -e "${RED}❌ 输入无效，限速速度未更改。${NC}"
         fi
     fi
-
-    echo ""
-    echo -e "${WHITE}当前限速模式: ${GREEN}${LIMIT_MODE}${NC} (${NC}$(case "$LIMIT_MODE" in "all")echo "上传和下载" ;; "download")echo "仅下载" ;; "upload")echo "仅上传" ;; esac)${NC})"
-    echo -e "${CYAN}请选择新的限速模式: ${NC}"
-    echo -e "  ${WHITE}1.${NC} 上传和下载 (all)"
-    echo -e "  ${WHITE}2.${NC} 仅下载 (download)"
-    echo -e "  ${WHITE}3.${NC} 仅上传 (upload)"
-    read -rp "${CYAN}➜ 请输入 [1-3] 或回车跳过: ${NC}" new_limit_mode_choice
-    case "$new_limit_mode_choice" in
-        1) new_mode="all" ;;
-        2) new_mode="download" ;;
-        3) new_mode="upload" ;;
-        *) new_mode="$LIMIT_MODE" ;; # 保持不变
-    esac
-    if [ "$new_mode" != "$LIMIT_MODE" ]; then
-        LIMIT_MODE="$new_mode"
-        update_config_value "LIMIT_MODE" "$LIMIT_MODE"
-        echo -e "${GREEN}✅ 限速模式已更新为: ${LIMIT_MODE}${NC}"
-        if [ "$LIMIT_ENABLED" = "true" ]; then
-            echo -e "${YELLOW}🔄 限速模式已更改，正在重新应用限速规则...${NC}"
-            apply_speed_limit
-        fi
-    fi
-
     echo ""
     echo -e "${GREEN}✅ 配置修改完成。${NC}"
     log_message "INFO" "配置修改操作完成。"
-}
-
-# 管理 IP 白名单/黑名单
-manage_ip_filters() {
-    load_config "--interactive"
-    clear
-    echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${MAGENTA}║                      🛡️ IP 过滤管理 🛡️                      ║${NC}"
-    echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-
-    echo -e "${WHITE}当前 IP 白名单: ${GREEN}${IP_WHITELIST:-无}${NC}"
-    echo -e "${WHITE}当前 IP 黑名单: ${RED}${IP_BLACKLIST:-无}${NC}"
-    echo ""
-
-    echo -e "${CYAN}请选择操作: ${NC}"
-    echo -e "  ${WHITE}1.${NC} ➕ 添加/修改 IP 白名单 (多个IP用逗号分隔，支持CIDR)"
-    echo -e "  ${WHITE}2.${NC} ➖ 清除 IP 白名单"
-    echo -e "  ${WHITE}3.${NC} 🚫 添加/修改 IP 黑名单 (多个IP用逗号分隔，支持CIDR)"
-    echo -e "  ${WHITE}4.${NC} 🗑️ 清除 IP 黑名单"
-    echo -e "  ${WHITE}0.${NC} ↩️ 返回主菜单"
-    echo ""
-    read -rp "${MAGENTA}➜ 请选择操作 [0-4]: ${NC}" filter_choice
-
-    case "$filter_choice" in
-        1)
-            read -rp "${CYAN}➜ 请输入新的 IP 白名单 (例如: 192.168.1.10,10.0.0.5/24): ${NC}" new_whitelist
-            new_whitelist=$(echo "$new_whitelist" | sed 's/[[:space:]]//g') # 移除空格
-            if [[ -n "$new_whitelist" ]]; then
-                # 简单验证IP格式 (允许CIDR)
-                local valid_ips=true
-                IFS=',' read -ra ADDR <<< "$new_whitelist"
-                for i in "${ADDR[@]}"; do
-                    if ! [[ "$i" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
-                        valid_ips=false
-                        break
-                    fi
-                done
-                if $valid_ips; then
-                    IP_WHITELIST="$new_whitelist"
-                    update_config_value "IP_WHITELIST" "$IP_WHITELIST"
-                    echo -e "${GREEN}✅ IP 白名单已更新。${NC}"
-                else
-                    echo -e "${RED}❌ IP 格式无效，请检查输入。${NC}"
-                fi
-            else
-                echo -e "${YELLOW}ℹ️ 未输入 IP，白名单未更改。${NC}"
-            fi
-            ;;
-        2)
-            echo -e "${RED}⚠️ 确认清除 IP 白名单? (y/N): ${NC}"
-            read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_clear_whitelist
-            if [[ "$confirm_clear_whitelist" =~ ^[Yy]$ ]]; then
-                IP_WHITELIST=""
-                update_config_value "IP_WHITELIST" "$IP_WHITELIST"
-                echo -e "${GREEN}✅ IP 白名单已清除。${NC}"
-            else
-                echo -e "${YELLOW}🚫 操作取消。${NC}"
-            fi
-            ;;
-        3)
-            read -rp "${CYAN}➜ 请输入新的 IP 黑名单 (例如: 192.168.1.20,10.0.0.10/32): ${NC}" new_blacklist
-            new_blacklist=$(echo "$new_blacklist" | sed 's/[[:space:]]//g') # 移除空格
-            if [[ -n "$new_blacklist" ]]; then
-                local valid_ips=true
-                IFS=',' read -ra ADDR <<< "$new_blacklist"
-                for i in "${ADDR[@]}"; do
-                    if ! [[ "$i" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
-                        valid_ips=false
-                        break
-                    fi
-                done
-                if $valid_ips; then
-                    IP_BLACKLIST="$new_blacklist"
-                    update_config_value "IP_BLACKLIST" "$IP_BLACKLIST"
-                    echo -e "${GREEN}✅ IP 黑名单已更新。${NC}"
-                else
-                    echo -e "${RED}❌ IP 格式无效，请检查输入。${NC}"
-                fi
-            else
-                echo -e "${YELLOW}ℹ️ 未输入 IP，黑名单未更改。${NC}"
-            fi
-            ;;
-        4)
-            echo -e "${RED}⚠️ 确认清除 IP 黑名单? (y/N): ${NC}"
-            read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_clear_blacklist
-            if [[ "$confirm_clear_blacklist" =~ ^[Yy]$ ]]; then
-                IP_BLACKLIST=""
-                update_config_value "IP_BLACKLIST" "$IP_BLACKLIST"
-                echo -e "${GREEN}✅ IP 黑名单已清除。${NC}"
-            else
-                echo -e "${YELLOW}🚫 操作取消。${NC}"
-            fi
-            ;;
-        0)
-            log_message "INFO" "返回主菜单。"
-            return
-            ;;
-        *)
-            echo -e "${RED}❌ 无效选择，请重新输入。${NC}"
-            ;;
-    esac
-    log_message "INFO" "IP 过滤管理操作完成。"
-    # 如果限速正在运行，重新应用规则以使IP过滤生效
-    if [ "$LIMIT_ENABLED" = "true" ]; then
-        echo -e "${YELLOW}🔄 IP 过滤规则已更改，正在重新应用限速规则以生效...${NC}"
-        apply_speed_limit # 这将重新加载并应用所有TC规则，包括IP过滤
-    fi
-}
-
-
-# 检查服务状态并尝试修复
-check_service_status() {
-    clear
-    echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${MAGENTA}║                  🩺 服务状态检查与修复 🩹                  ║${NC}"
-    echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    log_message "INFO" "执行服务状态检查。"
-
-    local service_name="ce-traffic-monitor.service"
-    local timer_name="ce-traffic-monitor.timer"
-    local vnstat_service="vnstat.service"
-
-    echo -e "${WHITE}检查 ${CYAN}${service_name}${WHITE} 状态...${NC}"
-    if systemctl is-active --quiet "$service_name"; then
-        echo -e "${GREEN}  ✅ ${service_name} 正在运行。${NC}"
-    else
-        echo -e "${RED}  ❌ ${service_name} 未运行或状态异常。尝试重启...${NC}"
-        systemctl start "$service_name" &>/dev/null || true # 允许启动失败
-        if systemctl is-active --quiet "$service_name"; then
-            echo -e "${GREEN}  ✅ ${service_name} 已成功启动。${NC}"
-            log_message "INFO" "${service_name} 已自动修复。"
-        else
-            echo -e "${RED}  ❌ 无法启动 ${service_name}。请手动检查日志。${NC}"
-            log_message "ERROR" "无法启动 ${service_name}。"
-        fi
-    fi
-    echo ""
-
-    echo -e "${WHITE}检查 ${CYAN}${timer_name}${WHITE} 状态...${NC}"
-    if systemctl is-active --quiet "$timer_name"; then
-        echo -e "${GREEN}  ✅ ${timer_name} 正在运行。${NC}"
-    else
-        echo -e "${RED}  ❌ ${timer_name} 未运行或状态异常。尝试启动...${NC}"
-        systemctl start "$timer_name" &>/dev/null || true
-        if systemctl is-active --quiet "$timer_name"; then
-            echo -e "${GREEN}  ✅ ${timer_name} 已成功启动。${NC}"
-            log_message "INFO" "${timer_name} 已自动修复。"
-        else
-            echo -e "${RED}  ❌ 无法启动 ${timer_name}。请手动检查日志。${NC}"
-            log_message "ERROR" "无法启动 ${timer_name}。"
-        fi
-    fi
-    echo ""
-
-    echo -e "${WHITE}检查 ${CYAN}${vnstat_service}${WHITE} 状态...${NC}"
-    if systemctl is-active --quiet "$vnstat_service"; then
-        echo -e "${GREEN}  ✅ ${vnstat_service} 正在运行。${NC}"
-    else
-        echo -e "${RED}  ❌ ${vnstat_service} 未运行或状态异常。尝试重启...${NC}"
-        systemctl restart "$vnstat_service" &>/dev/null || true
-        if systemctl is-active --quiet "$vnstat_service"; then
-            echo -e "${GREEN}  ✅ ${vnstat_service} 已成功启动。${NC}"
-            log_message "INFO" "${vnstat_service} 已自动修复。"
-        else
-            echo -e "${RED}  ❌ 无法启动 ${vnstat_service}。请手动检查日志。${NC}"
-            log_message "ERROR" "无法启动 ${vnstat_service}。"
-        fi
-    fi
-    echo ""
-    echo -e "${GREEN}✅ 服务状态检查完成。${NC}"
-    log_message "INFO" "服务状态检查操作完成。"
 }
 
 # 创建监控服务
@@ -1243,14 +939,12 @@ WantedBy=multi-user.target
 EOF
 
     # 监控脚本 (由 systemd 执行)
-    # 这个脚本将在每次定时器触发时运行
     cat > "$MONITOR_SCRIPT" << 'EOF'
 #!/bin/bash
 set -euo pipefail
 
 CONFIG_FILE="/etc/ce_traffic_limit.conf"
 TRAFFIC_LOG="/var/log/ce-daily-traffic.log"
-PERSISTENCE_FILE="/var/lib/ce_traffic_limit_data.conf"
 
 log_monitor_message() {
     local type="$1"
@@ -1266,15 +960,12 @@ load_monitor_config() {
         MONTHLY_LIMIT=${MONTHLY_LIMIT:-$(echo "$DAILY_LIMIT * 10" | bc)}
         INTERFACE=${INTERFACE:-}
         LIMIT_ENABLED=${LIMIT_ENABLED:-false}
-        LIMIT_MODE=${LIMIT_MODE:-"all"}
         LAST_RESET_DATE=${LAST_RESET_DATE:-$(date +%Y-%m-%d)}
         DAILY_START_RX=${DAILY_START_RX:-0}
         DAILY_START_TX=${DAILY_START_TX:-0}
         LAST_MONTHLY_RESET_DATE=${LAST_MONTHLY_RESET_DATE:-$(date +%Y-%m)}
         MONTHLY_START_RX=${MONTHLY_START_RX:-0}
         MONTHLY_START_TX=${MONTHLY_START_TX:-0}
-        IP_WHITELIST=${IP_WHITELIST:-""}
-        IP_BLACKLIST=${IP_BLACKLIST:-""}
     else
         log_monitor_message "ERROR" "配置文件 $CONFIG_FILE 不存在或无法读取，监控服务无法运行。"
         exit 1
@@ -1291,22 +982,6 @@ update_monitor_config_value() {
         log_monitor_message "ERROR" "monitor: 更新配置文件中的 ${key} 失败。"
     fi
 }
-
-persist_monitor_traffic_data() {
-    local current_rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
-    local current_tx=$(cat "/sys/class/net/$INTERFACE/statistics/tx_bytes" 2>/dev/null || echo 0)
-    
-    cat > "$PERSISTENCE_FILE" << EOF
-LAST_RESET_DATE_PERSIST=${LAST_RESET_DATE}
-DAILY_START_RX_PERSIST=${DAILY_START_RX}
-DAILY_START_TX_PERSIST=${DAILY_START_TX}
-LAST_MONTHLY_RESET_DATE_PERSIST=${LAST_MONTHLY_RESET_DATE}
-MONTHLY_START_RX_PERSIST=${MONTHLY_START_RX}
-MONTHLY_START_TX_PERSIST=${MONTHLY_START_TX}
-EOF
-    log_monitor_message "INFO" "流量计数器数据已持久化。"
-}
-
 
 get_current_usage_bytes_raw_monitor() {
     local rx=$(cat "/sys/class/net/$INTERFACE/statistics/rx_bytes" 2>/dev/null || echo 0)
@@ -1371,62 +1046,6 @@ get_daily_usage_bytes_monitor() {
     echo "$daily_total"
 }
 
-# --- Monitor Script Specific TC Functions ---
-remove_all_tc_rules_monitor() {
-    tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
-    tc qdisc del dev "$INTERFACE" ingress 2>/dev/null || true
-    tc qdisc del dev ifb0 root 2>/dev/null || true
-    if ip link show ifb0 &>/dev/null; then
-        ip link set dev ifb0 down 2>/dev/null || true
-        ip link del ifb0 type ifb 2>/dev/null || true
-    fi
-    log_monitor_message "INFO" "monitor: 清除所有TC限速规则。"
-}
-
-apply_download_limit_monitor() {
-    local speed_bps=$((SPEED_LIMIT * 8 * 1024))
-    if ! lsmod | grep -q ifb; then modprobe ifb || { log_monitor_message "ERROR" "monitor: 无法加载 ifb 模块。"; return 1; }; fi
-    if ! ip link show ifb0 &>/dev/null; then ip link add ifb0 type ifb || { log_monitor_message "ERROR" "monitor: 无法创建 ifb0 设备。"; return 1; }; ip link set dev ifb0 up || { log_monitor_message "ERROR" "monitor: 无法启用 ifb0 设备。"; return 1; }; fi
-
-    tc qdisc add dev "$INTERFACE" handle ffff: ingress \
-       && tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0 \
-       && tc qdisc add dev ifb0 root handle 1: htb default 30 \
-       && tc class add dev ifb0 parent 1: classid 1:1 htb rate "${speed_bps}bit" \
-       && tc class add dev ifb0 parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
-       && tc filter add dev ifb0 protocol ip parent 1:0 prio 1 u32 match ip src 0.0.0.0/0 flowid 1:10
-}
-
-apply_upload_limit_monitor() {
-    local speed_bps=$((SPEED_LIMIT * 8 * 1024))
-    tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 \
-       && tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" \
-       && tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
-       && tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10
-}
-
-apply_ip_filters_monitor() {
-    if [ -n "$IP_WHITELIST" ]; then
-        log_monitor_message "INFO" "monitor: 正在应用 IP 白名单: $IP_WHITELIST"
-        IFS=',' read -ra ips <<< "$IP_WHITELIST"
-        for ip in "${ips[@]}"; do
-            # Add filter to bypass for whitelisted IPs (high priority)
-            tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 0 u32 match ip src "$ip" flowid 1:0 # Bypass egress
-            tc filter add dev "$INTERFACE" protocol ip parent ffff: prio 0 u32 match ip dst "$ip" flowid 1:0 # Bypass ingress
-        done
-    fi
-    if [ -n "$IP_BLACKLIST" ]; then
-        log_monitor_message "INFO" "monitor: 正在应用 IP 黑名单: $IP_BLACKLIST"
-        IFS=',' read -ra ips <<< "$IP_BLACKLIST"
-        for ip in "${ips[@]}"; do
-            # Add filter to drop for blacklisted IPs (very high priority)
-            tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio -1 u32 match ip src "$ip" drop # Drop egress
-            tc filter add dev "$INTERFACE" protocol ip parent ffff: prio -1 u32 match ip dst "$ip" drop # Drop ingress
-        done
-    fi
-}
-
-
-# --- Main Monitor Logic ---
 load_monitor_config
 
 current_day=$(date +%Y-%m-%d)
@@ -1437,11 +1056,20 @@ if [ "$current_day" != "$LAST_RESET_DATE" ]; then
     update_monitor_config_value "DAILY_START_TX" "${current_stats[1]}"
     update_monitor_config_value "LAST_RESET_DATE" "$current_day"
     
-    # 无论是否限速，新一天都清除旧规则并重置LIMIT_ENABLED
-    remove_all_tc_rules_monitor
-    update_monitor_config_value "LIMIT_ENABLED" "false"
-    log_monitor_message "INFO" "新的一天，自动解除限速。"
-    load_monitor_config # 重新加载以获取最新状态
+    if [ "$LIMIT_ENABLED" = "true" ]; then
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC egress qdisc 失败或不存在。"
+        tc qdisc del dev "$INTERFACE" ingress 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC ingress qdisc 失败或不存在。"
+        tc qdisc del dev ifb0 root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 上的 qdisc 失败或不存在。"
+        
+        if ip link show ifb0 &>/dev/null; then
+            ip link set dev ifb0 down 2>/dev_null || log_monitor_message "WARN" "monitor: 关闭 ifb0 设备失败。"
+            ip link del ifb0 type ifb 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 设备失败。"
+            log_monitor_message "INFO" "ifb0 设备已关闭并移除。"
+        fi
+        update_monitor_config_value "LIMIT_ENABLED" "false"
+        log_monitor_message "INFO" "新的一天，自动解除限速。"
+    fi
+    load_monitor_config
 fi
 
 current_month=$(date +%Y-%m)
@@ -1451,91 +1079,60 @@ if [ "$current_month" != "$LAST_MONTHLY_RESET_DATE" ]; then
     update_monitor_config_value "MONTHLY_START_RX" "${current_stats[0]}"
     update_monitor_config_value "MONTHLY_START_TX" "${current_stats[1]}"
     update_monitor_config_value "LAST_MONTHLY_RESET_DATE" "$current_month"
-    load_monitor_config # 重新加载以获取最新状态
+    load_monitor_config
 fi
-
-# 持久化流量数据
-persist_monitor_traffic_data
 
 daily_total_bytes=$(get_daily_usage_bytes_monitor)
 used_gb=$(echo "scale=3; $daily_total_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
 limit_reached=$(echo "$used_gb >= $DAILY_LIMIT" | bc 2>/dev/null || echo "0")
 
-# 检查是否需要自动限速
 if [ "$limit_reached" -eq 1 ] && [ "$LIMIT_ENABLED" != "true" ] && [ "$DAILY_LIMIT" -gt 0 ]; then
-    log_monitor_message "INFO" "触发自动限速：今日使用量=${used_gb}GB, 限制=${DAILY_LIMIT}GB"
-    remove_all_tc_rules_monitor # 确保清除旧规则
+    local speed_bps=$((SPEED_LIMIT * 8 * 1024))
     
-    local success=0
-    case "$LIMIT_MODE" in
-        "all")
-            if apply_upload_limit_monitor && apply_download_limit_monitor; then
-                success=1
-            fi
-            ;;
-        "download")
-            if apply_download_limit_monitor; then
-                success=1
-            fi
-            ;;
-        "upload")
-            if apply_upload_limit_monitor; then
-                success=1
-            fi
-            ;;
-    esac
+    tc qdisc del dev "$INTERFACE" root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC egress qdisc 失败或不存在 (自动限速前)。"
+    tc qdisc del dev "$INTERFACE" ingress 2>/dev/null || log_monitor_message "WARN" "monitor: 删除旧的TC ingress qdisc 失败或不存在 (自动限速前)。"
+    tc qdisc del dev ifb0 root 2>/dev/null || log_monitor_message "WARN" "monitor: 删除 ifb0 上的 qdisc 失败或不存在 (自动限速前)。"
 
-    if [ "$success" -eq 1 ]; then
-        apply_ip_filters_monitor # 应用IP过滤规则
-        update_monitor_config_value "LIMIT_ENABLED" "true"
-        log_monitor_message "INFO" "自动限速已启用: 模式=${LIMIT_MODE}, 速度=${SPEED_LIMIT}KB/s"
+    if tc qdisc add dev "$INTERFACE" root handle 1: htb default 30 \
+       && tc class add dev "$INTERFACE" parent 1: classid 1:1 htb rate "${speed_bps}bit" \
+       && tc class add dev "$INTERFACE" parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
+       && tc filter add dev "$INTERFACE" protocol ip parent 1:0 prio 1 u32 match ip dst 0.0.0.0/0 flowid 1:10; then
+        log_monitor_message "INFO" "自动上传限速触发: ${SPEED_LIMIT}KB/s"
     else
-        log_monitor_message "ERROR" "自动限速应用失败。"
-        update_monitor_config_value "LIMIT_ENABLED" "false" # 如果失败，确保状态为未启用
+        log_monitor_message "ERROR" "monitor: 自动上传限速规则应用失败。"
+        update_monitor_config_value "LIMIT_ENABLED" "false"
+        exit 1
     fi
-elif [ "$LIMIT_ENABLED" = "true" ] && [ "$limit_reached" -eq 0 ] && [ "$DAILY_LIMIT" -gt 0 ]; then
-    # 如果已经限速但流量又回到限制以下，理论上不应该自动解除，除非用户手动重置或新的一天
-    # 这里的逻辑是保持限速，直到新的一天或手动重置
-    log_monitor_message "INFO" "限速仍处于启用状态，但流量已回到限制以下。保持限速。"
-    # 重新应用规则以确保IP过滤规则生效，因为监控脚本每次执行都会重置TC规则
-    remove_all_tc_rules_monitor
-    local success=0
-    case "$LIMIT_MODE" in
-        "all")
-            if apply_upload_limit_monitor && apply_download_limit_monitor; then
-                success=1
-            fi
-            ;;
-        "download")
-            if apply_download_limit_monitor; then
-                success=1
-            fi
-            ;;
-        "upload")
-            if apply_upload_limit_monitor; then
-                success=1
-            fi
-            ;;
-    esac
-    if [ "$success" -eq 1 ]; then
-        apply_ip_filters_monitor # 重新应用IP过滤规则
+
+    if ! lsmod | grep -q ifb; then
+        modprobe ifb || { log_monitor_message "ERROR" "monitor: 无法加载 ifb 模块。"; exit 1; }
+    fi
+    if ! ip link show ifb0 &>/dev/null; then
+        ip link add ifb0 type ifb || { log_monitor_message "ERROR" "monitor: 无法创建 ifb0 设备。"; exit 1; }
+        ip link set dev ifb0 up || { log_monitor_message "ERROR" "monitor: 无法启用 ifb0 设备。"; exit 1; }
+        log_monitor_message "INFO" "monitor: ifb0 设备已创建并启用。"
+    fi
+
+    if tc qdisc add dev "$INTERFACE" handle ffff: ingress \
+       && tc filter add dev "$INTERFACE" parent ffff: protocol ip u32 match u32 0 0 flowid 1:1 action mirred egress redirect dev ifb0 \
+       && tc qdisc add dev ifb0 root handle 1: htb default 30 \
+       && tc class add dev ifb0 parent 1: classid 1:1 htb rate "${speed_bps}bit" \
+       && tc class add dev ifb0 parent 1:1 classid 1:10 htb rate "${speed_bps}bit" ceil "${speed_bps}bit" \
+       && tc filter add dev ifb0 protocol ip parent 1:0 prio 1 u32 match ip src 0.0.0.0/0 flowid 1:10; then
+        update_monitor_config_value "LIMIT_ENABLED" "true"
+        log_monitor_message "INFO" "自动下载限速触发: 使用量=${used_gb}GB, 速度=${SPEED_LIMIT}KB/s"
     else
-        log_monitor_message "ERROR" "重新应用限速失败，将禁用限速状态。"
+        log_monitor_message "ERROR" "monitor: 自动下载限速规则应用失败。"
+        tc qdisc del dev "$INTERFACE" root 2>/dev/null || true
         update_monitor_config_value "LIMIT_ENABLED" "false"
     fi
-elif [ "$DAILY_LIMIT" -eq 0 ] && [ "$LIMIT_ENABLED" = "true" ]; then
-    # 如果每日限制设置为0（无限制），并且限速当前是开启状态，则解除限速
-    log_monitor_message "INFO" "每日限制设置为0 (无限制)，解除限速。"
-    remove_all_tc_rules_monitor
-    update_monitor_config_value "LIMIT_ENABLED" "false"
 fi
-
 EOF
 
     chmod +x "$MONITOR_SCRIPT" || log_message "ERROR" "设置监控脚本可执行权限失败。"
     systemctl daemon-reload || log_message "ERROR" "daemon-reload 失败。"
-    echo -e "${GREEN}✅ 监控服务脚本已创建: ${WHITE}$MONITOR_SCRIPT${NC}"
-    echo -e "${GREEN}✅ Systemd 服务文件已创建: ${WHITE}$SERVICE_FILE${NC}"
+    echo -e "${GREEN}✅ 监控服务脚本已创建: $MONITOR_SCRIPT${NC}"
+    echo -e "${GREEN}✅ Systemd 服务文件已创建: $SERVICE_FILE${NC}"
     log_message "INFO" "监控服务脚本和Systemd服务文件已创建。"
 }
 
@@ -1558,7 +1155,7 @@ EOF
     systemctl daemon-reload || log_message "ERROR" "daemon-reload 失败。"
     systemctl enable ce-traffic-monitor.timer || log_message "ERROR" "启用定时器失败。"
     systemctl start ce-traffic-monitor.timer || log_message "ERROR" "启动定时器失败。"
-    echo -e "${GREEN}⏰ Systemd 定时器已创建并启动: ${WHITE}$TIMER_FILE${NC}"
+    echo -e "${GREEN}⏰ Systemd 定时器已创建并启动: $TIMER_FILE${NC}"
     log_message "INFO" "Systemd 定时器已创建并启动。"
 }
 
@@ -1582,11 +1179,11 @@ update_script() {
     fi
 
     local temp_script_file="/tmp/install_ce_new.sh"
-    echo -n "${YELLOW}🌐 正在从 ${WHITE}$SCRIPT_REMOTE_URL${YELLOW} 下载新版本脚本...${NC}"
+    echo -n "${YELLOW}🌐 正在从 $SCRIPT_REMOTE_URL 下载新版本脚本...${NC}"
     
     if ! curl -sSL "$SCRIPT_REMOTE_URL" -o "$temp_script_file" &>/dev/null; then
         echo -e "${RED}❌ 失败${NC}"
-        echo -e "${RED}❌ 错误: 下载新版本脚本失败。请检查网络连接或 ${WHITE}$SCRIPT_REMOTE_URL${RED} 是否可访问。${NC}"
+        echo -e "${RED}❌ 错误: 下载新版本脚本失败。请检查网络连接或 $SCRIPT_REMOTE_URL 是否可访问。${NC}"
         log_message "ERROR" "从 $SCRIPT_REMOTE_URL 下载脚本失败。"
         return 1
     else
@@ -1628,32 +1225,33 @@ show_status() {
     clear
     load_config "--interactive"
     
-    # Calculate padding for centered text
-    local title_length="CE 流量限速管理系统"
-    local padding_left=$(( (54 - ${#title_length}) / 2 ))
-    local padding_right=$(( 54 - ${#title_length} - padding_left ))
-    
-    printf "${CYAN}╔════════════════════════════════════════════════════════════╗\n"
-    printf "║%*s${WHITE}🚀 %s 🚀%*s${CYAN}║\n" "$padding_left" "" "$title_length" "$padding_right" ""
-    printf "╚════════════════════════════════════════════════════════════╝\n${NC}"
+    # 顶部美化标题
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                ${BOLD}🚀 CE 流量限速管理系统 🚀${NC}                  ${CYAN}║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     
-    printf " ${WHITE}🖥️ 系统版本: ${NC}%s\n" "${CACHED_OS_VERSION:-$(lsb_release -d 2>/dev/null | cut -f2 || echo "未知")}"
-    printf " ${WHITE}🌐 网络接口: ${CYAN}%s${NC}\n" "$INTERFACE"
-    printf " ${WHITE}📊 vnStat版本: ${CYAN}%s${NC}\n" "$(vnstat --version 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")"
-    printf " ${WHITE}⏱️ 更新时间: ${WHITE}%s${NC}\n" "$(date '+%Y-%m-%d %H:%M:%S')"
+    echo -e "${WHITE}🖥️ 系统版本:${NC} ${CACHED_OS_VERSION:-$(lsb_release -d 2>/dev/null | cut -f2 || echo "未知")}"
+    echo -e "${WHITE}🌐 网络接口:${NC} ${CYAN}${BOLD}$INTERFACE${NC}"
+    echo -e "${WHITE}📊 vnStat版本:${NC} ${CYAN}$(vnstat --version 2>/dev/null | head -1 | awk '{print $2}' || echo "未知")${NC}"
+    echo -e "${WHITE}⏱️ 更新时间:${NC} ${WHITE}$(date '+%Y-%m-%d %H:%M:%S')${NC}"
     echo ""
     
     local used_daily_bytes=$(get_daily_usage_bytes)
     local used_daily_gb=$(echo "scale=3; $used_daily_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
     local remaining_daily_gb=$(echo "scale=3; $DAILY_LIMIT - $used_daily_gb" | bc 2>/dev/null || echo "$DAILY_LIMIT")
-    local percentage_daily=$(echo "scale=1; $used_daily_gb * 100 / $DAILY_LIMIT" | bc 2>/dev/null || echo "0")
+    local percentage_daily=$(echo "scale=1; ($used_daily_gb * 100 / $DAILY_LIMIT) / 1" | bc 2>/dev/null || echo "0") # / 1 to strip trailing .00
+
+    if (( $(echo "$DAILY_LIMIT == 0" | bc -l) )); then
+        percentage_daily=0
+    fi
+
+    echo -e "${WHITE}📅 今日流量使用 (精确统计 - ${LAST_RESET_DATE}):${NC}"
+    echo -e "  ➡️ 已用: ${GREEN}${used_daily_gb}GB${NC} / ${YELLOW}${DAILY_LIMIT}GB${NC} (${percentage_daily}%)"
+    echo -e "  ⏳ 剩余: ${CYAN}${remaining_daily_gb}GB${NC}"
+    echo -e "  ∑ 总计: ${MAGENTA}$(format_traffic "$used_daily_bytes")${NC}"
     
-    printf "${WHITE}📅 今日流量使用 (精确统计 - %s):${NC}\n" "${LAST_RESET_DATE}"
-    printf "  ➡️ 已用: ${GREEN}%.3fGB${NC} / ${YELLOW}%dGB${NC} (${CYAN}%.1f%%${NC})\n" "$used_daily_gb" "$DAILY_LIMIT" "$percentage_daily"
-    printf "  ⏳ 剩余: ${MAGENTA}%.3fGB${NC}\n" "$remaining_daily_gb"
-    printf "  ∑ 总计: ${PURPLE}%s${NC}\n" "$(format_traffic "$used_daily_bytes")"
-    
+    # 改进的进度条显示
     local bar_length=50
     local filled_length=$(printf "%.0f" "$(echo "$percentage_daily * $bar_length / 100" | bc 2>/dev/null)")
     [ -z "$filled_length" ] && filled_length=0
@@ -1675,18 +1273,22 @@ show_status() {
             bar_daily+="░"
         fi
     done
-    printf "  [${bar_daily_color}%s${NC}]\n" "$bar_daily"
+    echo -e "  [${bar_daily_color}$bar_daily${NC}]"
     echo ""
 
     local used_monthly_bytes=$(get_monthly_usage_bytes)
     local used_monthly_gb=$(echo "scale=3; $used_monthly_bytes / 1024 / 1024 / 1024" | bc 2>/dev/null || echo "0")
     local remaining_monthly_gb=$(echo "scale=3; $MONTHLY_LIMIT - $used_monthly_gb" | bc 2>/dev/null || echo "$MONTHLY_LIMIT")
-    local percentage_monthly=$(echo "scale=1; $used_monthly_gb * 100 / $MONTHLY_LIMIT" | bc 2>/dev/null || echo "0")
+    local percentage_monthly=$(echo "scale=1; ($used_monthly_gb * 100 / $MONTHLY_LIMIT) / 1" | bc 2>/dev/null || echo "0")
+
+    if (( $(echo "$MONTHLY_LIMIT == 0" | bc -l) )); then
+        percentage_monthly=0
+    fi
     
-    printf "${WHITE}🗓️ 本月流量使用 (精确统计 - %s):${NC}\n" "${LAST_MONTHLY_RESET_DATE}"
-    printf "  ➡️ 已用: ${GREEN}%.3fGB${NC} / ${YELLOW}%dGB${NC} (${CYAN}%.1f%%${NC})\n" "$used_monthly_gb" "$MONTHLY_LIMIT" "$percentage_monthly"
-    printf "  ⏳ 剩余: ${MAGENTA}%.3fGB${NC}\n" "$remaining_monthly_gb"
-    printf "  ∑ 总计: ${PURPLE}%s${NC}\n" "$(format_traffic "$used_monthly_bytes")"
+    echo -e "${WHITE}🗓️ 本月流量使用 (精确统计 - ${LAST_MONTHLY_RESET_DATE}):${NC}"
+    echo -e "  ➡️ 已用: ${GREEN}${used_monthly_gb}GB${NC} / ${YELLOW}${MONTHLY_LIMIT}GB${NC} (${percentage_monthly}%)"
+    echo -e "  ⏳ 剩余: ${CYAN}${remaining_monthly_gb}GB${NC}"
+    echo -e "  ∑ 总计: ${MAGENTA}$(format_traffic "$used_monthly_bytes")${NC}"
 
     local monthly_filled_length=$(printf "%.0f" "$(echo "$percentage_monthly * $bar_length / 100" | bc 2>/dev/null)")
     [ -z "$monthly_filled_length" ] && monthly_filled_length=0
@@ -1708,57 +1310,43 @@ show_status() {
             bar_monthly+="░"
         fi
     done
-    printf "  [${bar_monthly_color}%s${NC}]\n" "$bar_monthly"
+    echo -e "  [${bar_monthly_color}$bar_monthly${NC}]"
     echo ""
     
     if [ "$LIMIT_ENABLED" = "true" ]; then
-        printf "${RED}🔴 限速状态: 已启用 (${WHITE}%dKB/s${RED} - %s)${NC}\n" "$SPEED_LIMIT" "$(case "$LIMIT_MODE" in "all")echo "上传和下载" ;; "download")echo "仅下载" ;; "upload")echo "仅上传" ;; esac)"
+        echo -e "${RED}🔴 ${BOLD}限速状态: 已启用 (${SPEED_LIMIT}KB/s - 上传和下载)${NC}"
     else
-        printf "${GREEN}🟢 限速状态: 未启用${NC}\n"
-    fi
-    echo ""
-
-    if [ -n "$IP_WHITELIST" ]; then
-        printf "${GREEN}🛡️ IP 白名单: ${WHITE}%s${NC}\n" "$IP_WHITELIST"
-    fi
-    if [ -n "$IP_BLACKLIST" ]; then
-        printf "${RED}🚫 IP 黑名单: ${WHITE}%s${NC}\n" "$IP_BLACKLIST"
+        echo -e "${GREEN}🟢 ${BOLD}限速状态: 未启用${NC}"
     fi
     echo ""
 }
 
 # 主菜单
 show_menu() {
-    local title_length="操作菜单"
-    local padding_left=$(( (54 - ${#title_length}) / 2 ))
-    local padding_right=$(( 54 - ${#title_length} - padding_left ))
-
-    printf "${MAGENTA}╔════════════════════════════════════════════════════════════╗\n"
-    printf "║%*s${WHITE}🛠️ %s ⚙️%*s${MAGENTA}║\n" "$padding_left" "" "$title_length" "$padding_right" ""
-    printf "╠════════════════════════════════════════════════════════════╣\n"
-    printf "║  ${WHITE}1.${NC} 🚀 开启流量限速 (Enable traffic limiting)                ${MAGENTA}║\n"
-    printf "║  ${WHITE}2.${NC} 🟢 解除流量限速 (Disable traffic limiting)               ${MAGENTA}║\n"
-    printf "║  ${WHITE}3.${NC} ⚡ 实时网速显示 (Real-time Network Speed)             ${MAGENTA}║\n"
-    printf "║  ${WHITE}4.${NC} 📊 网络速度测试 (Network speed test)                   ${MAGENTA}║\n"
-    printf "║  ${WHITE}5.${NC} 📋 详细流量统计 (Detailed traffic statistics)           ${MAGENTA}║\n"
-    printf "║  ${WHITE}6.${NC} 📈 高级流量统计 (Advanced Traffic Statistics)           ${MAGENTA}║\n"
-    printf "║  ${WHITE}7.${NC} 🔧 修改配置 (Modify Configuration)                      ${MAGENTA}║\n"
-    printf "║  ${WHITE}8.${NC} 🛡️ IP 过滤管理 (IP Filter Management)                  ${MAGENTA}║\n"
-    printf "║  ${WHITE}9.${NC} 🩺 服务状态检查 (Check Service Status)                 ${MAGENTA}║\n"
-    printf "║  ${WHITE}10.${NC} 🔄 重置今日计数 (Reset daily counter)                    ${MAGENTA}║\n"
-    printf "║  ${WHITE}11.${NC} 🔄 重置每月计数 (Reset monthly counter)                  ${MAGENTA}║\n"
-    printf "║  ${WHITE}12.${NC} ⬆️ 系统更新 (System Update)                             ${MAGENTA}║\n"
-    printf "║  ${WHITE}13.${NC} ⚙️ 更新脚本 (Update script)                             ${MAGENTA}║\n"
-    printf "║  ${WHITE}14.${NC} 🗑️ 卸载所有组件 (Uninstall all components)               ${MAGENTA}║\n"
-    printf "║  ${WHITE}0.${NC} 👋 退出程序 (Exit program)                               ${MAGENTA}║\n"
-    printf "╚════════════════════════════════════════════════════════════╝\n${NC}"
+    echo -e "${MAGENTA}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${MAGENTA}║                       🛠️ ${BOLD}操作菜单${NC} ⚙️                        ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}╠════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}1.${NC} 🚀 开启流量限速 (Enable traffic limiting)                      ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}2.${NC} 🟢 解除流量限速 (Disable traffic limiting)                     ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}3.${NC} ⚡ 实时网速显示 (Real-time Network Speed)                  ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}4.${NC} 📊 网络速度测试 (Network speed test)                         ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}5.${NC} 📋 详细流量统计 (Detailed traffic statistics)                ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}6.${NC} 📈 高级流量统计 (Advanced Traffic Statistics)                ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}7.${NC} 🔧 修改配置 (Modify Configuration)                           ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}8.${NC} 🔄 重置今日计数 (Reset daily counter)                        ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}9.${NC} 🔄 重置每月计数 (Reset monthly counter)                      ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}10.${NC} ⬆️ 系统更新 (System Update)                                  ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}11.${NC} ⚙️ 更新脚本 (Update script)                                  ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}12.${NC} 🗑️ 卸载所有组件 (Uninstall all components)                   ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}║  ${WHITE}0.${NC} 👋 退出程序 (Exit program)                                   ${MAGENTA}║${NC}"
+    echo -e "${MAGENTA}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
 # 重置每日计数器
 reset_daily_counter() {
     echo -e "${RED}⚠️ 确认重置今日流量计数? 这将重新开始计算今日流量 (y/N): ${NC}"
-    read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_reset
+    read -rp "${WHITE}请输入 (y/N): ${NC}" confirm_reset
     if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}🔄 重置今日流量计数器...${NC}"
         
@@ -1769,7 +1357,7 @@ reset_daily_counter() {
         
         if [ "$LIMIT_ENABLED" = "true" ]; then
             echo -e "${YELLOW}🚦 检测到当前有限速，是否同时解除限速? (y/N): ${NC}"
-            read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" remove_limit
+            read -rp "${WHITE}请输入 (y/N): ${NC}" remove_limit
             if [[ "$remove_limit" =~ ^[Yy]$ ]]; then
                 remove_speed_limit
             fi
@@ -1786,7 +1374,7 @@ reset_daily_counter() {
 # 重置每月计数器
 reset_monthly_counter() {
     echo -e "${RED}⚠️ 确认重置每月流量计数? 这将重新开始计算每月流量 (y/N): ${NC}"
-    read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_reset
+    read -rp "${WHITE}请输入 (y/N): ${NC}" confirm_reset
     if [[ "$confirm_reset" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}🔄 重置每月流量计数器...${NC}"
         
@@ -1805,8 +1393,8 @@ reset_monthly_counter() {
 
 # 卸载功能
 uninstall_all() {
-    echo -e "${RED}⚠️ 确认卸载所有组件? 这将移除所有文件和配置 (y/N): ${NC}"
-    read -rp "${WHITE}➜ 请输入 (y/N): ${NC}" confirm_uninstall
+    echo -e "${RED}⚠️ 确认卸载所有组件? (y/N): ${NC}"
+    read -rp "${WHITE}请输入 (y/N): ${NC}" confirm_uninstall
     if [[ "$confirm_uninstall" =~ ^[Yy]$ ]]; then
        echo -e "${YELLOW}🗑️ 卸载中...${NC}"
        log_message "INFO" "开始卸载所有组件。"
@@ -1845,7 +1433,6 @@ uninstall_all() {
        rm -f "$SCRIPT_PATH" 2>/dev/null || log_message "WARN" "删除快捷命令失败。"
        rm -f "$TRAFFIC_LOG" 2>/dev/null || log_message "WARN" "删除流量日志文件失败。"
        rm -f "/etc/vnstat.conf.backup" 2>/dev/null || log_message "WARN" "删除 vnStat 备份配置失败。"
-       rm -f "$PERSISTENCE_FILE" 2>/dev/null || log_message "WARN" "删除持久化文件失败。"
        
        systemctl daemon-reload || log_message "ERROR" "daemon-reload 失败。"
        
@@ -1872,7 +1459,7 @@ interactive_mode() {
         show_status
         show_menu
         
-        read -rp "${MAGENTA}➜ 请选择操作 [0-14]: ${NC}" choice
+        read -rp "${MAGENTA}请选择操作 [0-12]: ${NC}" choice
         
         case "$choice" in
             1) apply_speed_limit ;;
@@ -1882,13 +1469,11 @@ interactive_mode() {
             5) show_detailed_stats ;;
             6) show_advanced_vnstat_stats ;;
             7) modify_config ;;
-            8) manage_ip_filters ;; # New option
-            9) check_service_status ;; # New option
-            10) reset_daily_counter ;;
-            11) reset_monthly_counter ;;
-            12) perform_system_update ;;
-            13) update_script ;;
-            14) uninstall_all ;;
+            8) reset_daily_counter ;;
+            9) reset_monthly_counter ;;
+            10) perform_system_update ;;
+            11) update_script ;;
+            12) uninstall_all ;;
             0)
                 echo -e "${GREEN}👋 感谢使用 CE 流量限速管理系统！再见！${NC}"
                 exit 0
@@ -1898,8 +1483,8 @@ interactive_mode() {
                 ;;
         esac
         # 对于所有非退出或卸载操作，等待用户输入以继续
-        if [[ "$choice" -ne 0 && "$choice" -ne 14 ]]; then
-            read -rp "${CYAN}➜ 按回车键继续...${NC}"
+        if [[ "$choice" -ne 0 && "$choice" -ne 12 ]]; then
+            read -rp "${CYAN}按回车键继续...${NC}"
         fi
     done
 }
@@ -1915,7 +1500,7 @@ NC='\033[0m'
 MAIN_SCRIPT="/usr/local/bin/install_ce.sh"
 
 if [ ! -f "$MAIN_SCRIPT" ]; then
-    echo -e "${RED}❌ 错误: 主脚本 ${MAIN_SCRIPT} 未找到。请重新运行安装程序。${NC}"
+    echo -e "${RED}❌ 错误: 主脚本 $MAIN_SCRIPT 未找到。请重新运行安装程序。${NC}"
     exit 1
 fi
 
@@ -1926,20 +1511,19 @@ else
 fi
 EOF
     chmod +x "$SCRIPT_PATH" || log_message "ERROR" "设置ce命令可执行权限失败。"
-    echo -e "${GREEN}✅ 'ce' 命令已创建: ${WHITE}$SCRIPT_PATH${NC}"
+    echo -e "${GREEN}✅ 'ce' 命令已创建: $SCRIPT_PATH${NC}"
     log_message "INFO" "'ce' 命令已创建。"
 }
 
 # 主安装函数
 main_install() {
-    local title_length="CE 流量限速管理系统 - 安装程序"
-    local padding_left=$(( (54 - ${#title_length}) / 2 ))
-    local padding_right=$(( 54 - ${#title_length} - padding_left ))
-
-    printf "${PURPLE}╔════════════════════════════════════════════════════════════╗\n"
-    printf "║%*s${WHITE}🌟 %s 🌟%*s${PURPLE}║\n" "$padding_left" "" "$title_length" "$padding_right" ""
-    printf "║%*s精确流量统计 & 每月统计版本%*s║\n" $(( (54 - 20) / 2 )) "" $(( 54 - 20 - $(( (54 - 20) / 2 )) )) ""
-    printf "╚════════════════════════════════════════════════════════════╝\n${NC}"
+    clear # 清屏以获得更好的视觉效果
+    echo -e "${PURPLE}${BOLD}"
+    echo "╔════════════════════════════════════════════════════════════╗"
+    echo "║              🌟 CE 流量限速管理系统 - 安装程序 🌟              ║"
+    echo "║                 精确流量统计 & 每月统计版本                  ║"
+    echo "╚════════════════════════════════════════════════════════════╝"
+    echo "${NC}"
     echo ""
     log_message "INFO" "开始执行主安装程序。"
     
@@ -1950,7 +1534,7 @@ main_install() {
     DAILY_LIMIT=30
     SPEED_LIMIT=512
     MONTHLY_LIMIT=$(echo "$DAILY_LIMIT * 10" | bc)
-    create_config # 这会调用 init_daily_counter 和 init_monthly_counter
+    create_config
     create_monitor_service
     create_timer
     
@@ -1961,23 +1545,20 @@ main_install() {
     
     touch "$TRAFFIC_LOG" 2>/dev/null || log_message "ERROR" "创建流量日志文件失败。"
     chmod 644 "$TRAFFIC_LOG" || log_message "ERROR" "设置流量日志文件权限失败。"
-
-    touch "$PERSISTENCE_FILE" 2>/dev/null || log_message "ERROR" "创建持久化文件失败。"
-    chmod 600 "$PERSISTENCE_FILE" || log_message "ERROR" "设置持久化文件权限失败。"
     
     echo ""
-    printf "${GREEN}╔════════════════════════════════════════════════════════════╗\n"
-    printf "║%*s${WHITE}🎉 安装完成！ 🎉%*s${GREEN}║\n" $(( (54 - 10) / 2 )) "" $(( 54 - 10 - $(( (54 - 10) / 2 )) )) ""
-    printf "╠════════════════════════════════════════════════════════════╣\n"
-    printf "║  ➡️ 输入 '${WHITE}ce${GREEN}' 命令进入交互界面 (Enter 'ce' command to enter interactive mode)    ║\n"
-    printf "║  ➡️ 每日流量限制: ${WHITE}%dGB/天${GREEN} (Daily traffic limit: GB/day)             ║\n" "$DAILY_LIMIT"
-    printf "║  ➡️ 每月流量限制: ${WHITE}%dGB/月${GREEN} (Monthly traffic limit: GB/month)           ║\n" "$MONTHLY_LIMIT"
-    printf "║  ➡️ 限速速度: ${WHITE}%dKB/s${GREEN} (Speed limit: KB/s)                             ║\n" "$SPEED_LIMIT"
-    printf "║  ➡️ 统计方式: 系统网卡精确统计 (支持vnStat备选) (Statistics method: System NIC precise stats (vnStat fallback supported))                 ║\n"
-    printf "║  ➡️ 新增功能: IP 过滤, 灵活限速模式, 服务修复等 (New features: IP filtering, flexible limits, service repair etc.)                  ║\n"
-    printf "╚════════════════════════════════════════════════════════════╝\n${NC}"
+    echo -e "${GREEN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                          🎉 ${BOLD}安装完成！${NC} 🎉                      ${GREEN}║${NC}"
+    echo -e "${GREEN}╠════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "${GREEN}║  ➡️ ${BOLD}输入 'ce' 命令进入交互界面 (Enter 'ce' command to enter interactive mode)    ${NC} ${GREEN}║${NC}"
+    echo -e "${GREEN}║  ➡️ 每日流量限制: ${BOLD}${DAILY_LIMIT}GB/天${NC} (Daily traffic limit: GB/day)             ${GREEN}║${NC}"
+    echo -e "${GREEN}║  ➡️ 每月流量限制: ${BOLD}${MONTHLY_LIMIT}GB/月${NC} (Monthly traffic limit: GB/month)           ${GREEN}║${NC}"
+    echo -e "${GREEN}║  ➡️ 限速速度: ${BOLD}${SPEED_LIMIT}KB/s${NC} (Speed limit: KB/s)                             ${GREEN}║${NC}"
+    echo -e "${GREEN}║  ➡️ 统计方式: 系统网卡精确统计 (支持vnStat备选) (Statistics method: System NIC precise stats (vnStat fallback supported))                 ${GREEN}║${NC}"
+    echo -e "${GREEN}║  ➡️ 新增功能: 每月流量统计、详细统计、手动重置 (New features: Monthly stats, detailed stats, manual reset)                  ${GREEN}║${NC}"
+    echo -e "${GREEN}╚════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "${YELLOW}💡 提示: 系统已开始精确统计今日及本月流量使用情况${NC}"
+    echo -e "${YELLOW}💡 ${BOLD}提示: 系统已开始精确统计今日及本月流量使用情况${NC}"
     log_message "INFO" "主安装程序完成。"
 }
 
